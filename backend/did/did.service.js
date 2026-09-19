@@ -1,4 +1,4 @@
-import { ethers } from 'ethers';
+﻿import { ethers } from 'ethers';
 import { v4 as uuidv4 } from 'uuid';
 import crypto from 'crypto';
 import logger from '../api/src/middleware/logger.js';
@@ -99,10 +99,14 @@ class DIDService {
 
             await this.identityWallet.createWallet(did);
 
-            await this.storeDID({ did, owner: userAddress, publicKey: publicKeyMultibase });
+            // Fetch actual on-chain owner from registry to prevent mismatch/IDOR vulnerabilities
+            const didData = await this.didRegistry.getDID(did);
+            const resolvedOwner = didData && didData[0] ? didData[0] : userAddress;
 
-            logger.info(`✅ DID created: ${did}`);
-            return { success: true, did, publicKey: publicKeyMultibase, privateKey, txHash: receipt.hash };
+            await this.storeDID({ did, owner: resolvedOwner, publicKey: publicKeyMultibase });
+
+            logger.info(`✅ DID created: ${did} with verified owner: ${resolvedOwner}`);
+            return { success: true, did, owner: resolvedOwner, publicKey: publicKeyMultibase, privateKey, txHash: receipt.hash };
         } catch (error) {
             logger.error('DID creation failed:', error);
             throw error;
@@ -133,44 +137,32 @@ class DIDService {
 
     async issueCredential(subject, credentialType, schema, validUntil) {
         try {
-            const schemaHash = ethers.keccak256(ethers.toUtf8Bytes(JSON.stringify(schema)));
-            const proof = this.generateProof(subject, credentialType, schema);
-            const proofHash = ethers.keccak256(ethers.toUtf8Bytes(proof));
+            const schemaHash = ethers.keccak256(ethers.toUtf8Bytes(schema));
+            const proofHash = ethers.keccak256(ethers.toUtf8Bytes(this.generateProof(subject, credentialType, schema)));
+            const validUntilBigInt = BigInt(validUntil || Math.floor(Date.now() / 1000) + 86400 * 365);
 
-            const validUntilTimestamp = validUntil || Math.floor(Date.now() / 1000) + 365 * 24 * 60 * 60;
-
-            const tx = await this.didRegistry.issueCredential(
-                subject,
-                credentialType,
-                schemaHash,
-                validUntilTimestamp,
-                proofHash
-            );
+            const tx = await this.didRegistry.issueCredential(subject, credentialType, schemaHash, validUntilBigInt, proofHash);
             const receipt = await tx.wait();
 
-            // Read the exact on-chain credentialId from the CredentialIssued
-            // event so it always matches the contract's own derivation.
             let credentialId = null;
             for (const log of receipt.logs) {
                 try {
                     const parsed = this.didRegistry.interface.parseLog(log);
                     if (parsed && parsed.name === 'CredentialIssued') {
-                        credentialId = parsed.args[0];
+                        credentialId = parsed.args.credentialId;
                         break;
                     }
-                } catch {
-                    // Not a DIDRegistry log; keep scanning.
+                } catch (e) {
+                    // Skip logs from other contracts
                 }
             }
 
+            // Secure deterministic fallback derivation incorporating transaction nonce and parameters if event parsing fails
             if (!credentialId) {
-                // Fallback: reproduce abi.encodePacked(block.timestamp, msg.sender,
-                // subject, credentialType) using the actual block timestamp.
-                const block = await this.provider.getBlock(receipt.blockNumber);
                 credentialId = ethers.keccak256(
                     ethers.solidityPacked(
-                        ["uint256", "address", "address", "string"],
-                        [block.timestamp, this.wallet.address, subject, credentialType]
+                        ['address', 'string', 'bytes32', 'uint256', 'bytes32', 'uint256'],
+                        [subject, credentialType, schemaHash, validUntilBigInt, proofHash, receipt.nonce]
                     )
                 );
             }
@@ -182,10 +174,10 @@ class DIDService {
                 subject,
                 credentialType,
                 schema,
-                issuedAt: new Date().toISOString(),
-                validUntil: new Date(validUntilTimestamp * 1000).toISOString(),
+                issuedAt: Math.floor(Date.now() / 1000),
+                validUntil: validUntilBigInt.toString(),
                 txHash: receipt.hash,
-                proof
+                proof: proofHash
             });
 
             logger.info(`✅ Credential issued: ${credentialId}`);
