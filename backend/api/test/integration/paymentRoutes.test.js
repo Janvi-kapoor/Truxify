@@ -105,6 +105,18 @@ describe('POST /api/payments/upi-intent', () => {
     expect(res.body.error).toBe('UPI payments are not configured on the server.');
   });
 
+  it('returns 503 when PLATFORM_UPI_ID is an empty string or whitespace', async () => {
+    process.env.PLATFORM_UPI_ID = '   ';
+
+    const res = await request(buildApp())
+      .post('/api/payments/upi-intent')
+      .set(CUSTOMER_HEADERS)
+      .send({ order_id: 'order-1', customer_upi_id: 'customer@upi' });
+
+    expect(res.status).toBe(503);
+    expect(res.body.error).toBe('UPI payments are not configured on the server.');
+  });
+
   it('returns the configured platform UPI ID when PLATFORM_UPI_ID is set', async () => {
     process.env.PLATFORM_UPI_ID = 'payments@truxify';
 
@@ -120,3 +132,4 @@ describe('POST /api/payments/upi-intent', () => {
     expect(res.body.deep_link).toContain('pa=payments%40truxify');
   });
 });
+

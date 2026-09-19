@@ -33,11 +33,21 @@ export function getDisplayIdDate(displayId) {
   if (month < 1 || month > 12) return null;
   if (day < 1 || day > 31) return null;
 
-  // Validate using Date constructor: invalid dates produce "Invalid Date"
-  const parsed = new Date(`${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}T00:00:00Z`);
+  const parsed = new Date(
+    `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}T00:00:00Z`
+  );
+
+  // Validate that Date did not normalize an invalid calendar date
   if (Number.isNaN(parsed.getTime())) return null;
 
-  // Reject pre-2020 and post-2100 dates as clearly invalid
+  if (
+    parsed.getUTCFullYear() !== year ||
+    parsed.getUTCMonth() + 1 !== month ||
+    parsed.getUTCDate() !== day
+  ) {
+    return null;
+  }
+
   if (year < 2020 || year > 2100) return null;
 
   return dateStr;

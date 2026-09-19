@@ -499,11 +499,12 @@ func pruneGeofenceRateEntries() {
 		}
 		e.stamps = kept
 		if len(e.stamps) == 0 {
-			// Delete under the entry lock: a concurrent allowGeofence that
-			// re-locks the entry between the emptiness check and the removal
-			// would otherwise lose its timestamps when the entry is deleted,
-			// resetting that driver's 1-second window and allowing bursts
-			// above the cap.
+			// Delete under the entry lock: only retire the exact entry still
+			// mapped to the driver so a newer entry with its own slot is never disturbed.
+			if cur, ok := geofenceRateLimit.Load(e.driverID); !ok || cur.(*rateEntry) != e {
+				e.mu.Unlock()
+				return true
+			}
 			e.retired = true
 			geofenceRateLimit.Delete(key)
 			atomic.AddUint64(&geofenceRateTracked, ^uint64(0))

@@ -106,7 +106,7 @@ import {
 } from '../services/profileService.js';
 import { supabase, supabaseAdmin, createUserClient } from '../config/db.js';
 import { ProfileModel } from '../models/ProfileModel.js';
-import { invalidateCachedProfile, invalidateCachedSupabaseProfileAll } from '../lib/profileCache.js';
+import { invalidateCachedProfile, invalidateCachedSupabaseProfileAll, invalidateProfileCache } from '../lib/profileCache.js';
 import { auditLog } from '../middleware/auditLog.js';
 
 const router = express.Router();
@@ -620,13 +620,23 @@ router.get('/driver/statement', authenticate, requirePolicy('profile:view-statem
       };
     });
 
+    // Apply sorting before formatting output
+    if (sort_by === 'net_earnings') {
+      tripsList.sort((a, b) => (b.net_earnings - a.net_earnings) || new Date(b.pickup_date) - new Date(a.pickup_date));
+    } else if (sort_by === 'base_freight') {
+      tripsList.sort((a, b) => (b.base_freight - a.base_freight) || new Date(b.pickup_date) - new Date(a.pickup_date));
+    } else if (sort_by === 'pickup_date') {
+      tripsList.sort((a, b) => new Date(b.pickup_date) - new Date(a.pickup_date));
+    }
+
     if (format === 'csv') {
       // Optimize memory: construct CSV string directly using string builder/loop
       const sanitizeCsvValue = (val) => {
-        let str = String(val);
-  if (/^[=+\-@\t\r]/.test(str)) {
-    str = `'` + str;
-  }
+        if (val === null || val === undefined) return '""';
+        let str = String(val).replace(/[\r\n]+/g, ' ');
+        if (/^[=+\-@\t\r]/.test(str)) {
+          str = `'` + str;
+        }
         return `"${str.replace(/"/g, '""')}"`;
       };
       const headers = ['ID', 'Order Display ID', 'Pickup Address', 'Drop Address', 'Pickup Date', 'Base Freight', 'Platform Fee', 'Toll Estimate', 'Net Earnings', 'Status'];
@@ -635,15 +645,9 @@ router.get('/driver/statement', authenticate, requirePolicy('profile:view-statem
         const row = [t.id, t.order_display_id, t.pickup_address, t.drop_address, t.pickup_date, t.base_freight, t.platform_fee, t.toll_estimate, t.net_earnings, t.status];
         csvString += row.map(val => sanitizeCsvValue(val)).join(',') + '\n';
       }
-      res.setHeader('Content-Type', 'text/csv');
-      return res.send(csvString);
-    }
-    if (sort_by === 'net_earnings') {
-      // Optimize sorting: use net_earnings descending, fallback to pickup_date descending
-      tripsList.sort((a, b) => (b.net_earnings - a.net_earnings) || new Date(b.pickup_date) - new Date(a.pickup_date));
-    } else if (sort_by === 'base_freight') {
-      // Optimize sorting: use base_freight descending, fallback to pickup_date descending
-      tripsList.sort((a, b) => (b.base_freight - a.base_freight) || new Date(b.pickup_date) - new Date(a.pickup_date));
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', 'attachment; filename="driver_statement.csv"');
+      return res.send(csvString.trimEnd());
     }
 
     res.json({
@@ -856,3 +860,120 @@ export default router;
 
 
 // Resolves #2046: DELETE /admin/cache/:userId endpoint
+
+/*
+
+const router = express.Router();
+const { createClient } = require('@supabase/supabase-js');
+const authMiddleware = require('../middleware/authMiddleware');
+
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
+const supabase = createClient(supabaseUrl, supabaseKey);
+
+const VALID_ROLES = ['driver', 'customer', 'admin'];
+const PHONE_REGEX = /^\+?[1-9]\d{1,14}$/;
+
+const validateProfileUpdate = (req, res, next) => {
+  const { role, phone_number, full_name } = req.body;
+  
+  if (role !== undefined) {
+    if (!VALID_ROLES.includes(role)) {
+      return res.status(400).json({ 
+        error: 'Invalid role',
+        message: `Role must be one of: ${VALID_ROLES.join(', ')}` 
+      });
+    }
+    
+    if (role === 'admin' && req.user.role !== 'admin') {
+      return res.status(403).json({ 
+        error: 'Forbidden',
+        message: 'You do not have permission to assign the admin role.' 
+      });
+    }
+  }
+
+  if (phone_number !== undefined && phone_number !== '') {
+    if (!PHONE_REGEX.test(phone_number)) {
+      return res.status(400).json({
+        error: 'Invalid phone number',
+        message: 'Phone number must be in valid E.164 format.'
+      });
+    }
+  }
+
+  if (full_name !== undefined) {
+    if (typeof full_name !== 'string' || full_name.trim().length < 2 || full_name.length > 100) {
+      return res.status(400).json({
+        error: 'Invalid full name',
+        message: 'Full name must be between 2 and 100 characters.'
+      });
+    }
+  }
+  
+  next();
+};
+
+const updateProfile = async (req, res) => {
+  try {
+    const userId = req.user.uid;
+    const { full_name, phone_number, role, company_name, avatar_url } = req.body;
+
+    const updateData = {};
+    if (full_name !== undefined) updateData.full_name = full_name.trim();
+    if (phone_number !== undefined) updateData.phone_number = phone_number;
+    if (role !== undefined) updateData.role = role;
+    if (company_name !== undefined) updateData.company_name = company_name;
+    if (avatar_url !== undefined) updateData.avatar_url = avatar_url;
+    
+    if (Object.keys(updateData).length === 0) {
+      return res.status(400).json({ error: 'No valid fields provided for update' });
+    }
+
+    updateData.updated_at = new Date().toISOString();
+
+    const { data, error } = await supabase
+      .from('profiles')
+      .update(updateData)
+      .eq('id', userId)
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    return res.status(200).json({
+      success: true,
+      message: 'Profile updated successfully',
+      data,
+    });
+  } catch (err) {
+    console.error('Profile update error:', err.message);
+    return res.status(500).json({ error: 'Failed to update profile' });
+  }
+};
+
+const getProfile = async (req, res) => {
+  try {
+    const userId = req.user.uid;
+    
+    const { data, error } = await supabase
+      .from('profiles')
+      .select('*')
+      .eq('id', userId)
+      .single();
+
+    if (error) throw error;
+    if (!data) return res.status(404).json({ error: 'Profile not found' });
+
+    return res.status(200).json({ success: true, data });
+  } catch (err) {
+    console.error('Get profile error:', err.message);
+    return res.status(500).json({ error: 'Failed to fetch profile' });
+  }
+};
+
+router.get('/', authMiddleware, getProfile);
+router.put('/', authMiddleware, validateProfileUpdate, updateProfile);
+
+module.exports = router;
+*/

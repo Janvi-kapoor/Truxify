@@ -1,12 +1,13 @@
 import 'dart:convert';
 
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+import 'package:truxify_driver/services/secure_storage.dart';
 import 'package:truxify_driver/services/trip_cache.dart';
 
 void main() {
   setUp(() {
-    SharedPreferences.setMockInitialValues(<String, Object>{});
+    FlutterSecureStorage.setMockInitialValues(<String, String>{});
   });
 
   final trips = <Map<String, dynamic>>[
@@ -30,7 +31,8 @@ void main() {
   };
 
   group('TripCache.save/load', () {
-    test('save writes JSON and load returns it unchanged', () async {
+    test('save writes JSON to secure storage and load returns it unchanged',
+        () async {
       await TripCache.save(
         trips: trips,
         stopsByTripId: stopsByTripId,
@@ -38,21 +40,26 @@ void main() {
         itemsByTripId: itemsByTripId,
       );
 
-      final prefs = await SharedPreferences.getInstance();
-      expect(prefs.getString('truxify_driver_cached_trips'), jsonEncode(trips));
       expect(
-        prefs.getString('truxify_driver_cached_trip_stops'),
+        await SecureStorage.read('truxify_driver_cached_trips'),
+        jsonEncode(trips),
+      );
+      expect(
+        await SecureStorage.read('truxify_driver_cached_trip_stops'),
         jsonEncode(stopsByTripId),
       );
       expect(
-        prefs.getString('truxify_driver_cached_route_points'),
+        await SecureStorage.read('truxify_driver_cached_route_points'),
         jsonEncode(routePointsByTripId),
       );
       expect(
-        prefs.getString('truxify_driver_cached_trip_items'),
+        await SecureStorage.read('truxify_driver_cached_trip_items'),
         jsonEncode(itemsByTripId),
       );
-      expect(prefs.getString('truxify_driver_cached_trips_saved_at'), isNotNull);
+      expect(
+        await SecureStorage.read('truxify_driver_cached_trips_saved_at'),
+        isNotNull,
+      );
 
       final snapshot = await TripCache.load();
       expect(snapshot, isNotNull);
@@ -69,7 +76,7 @@ void main() {
     });
 
     test('load handles corrupt trips JSON gracefully', () async {
-      SharedPreferences.setMockInitialValues(<String, Object>{
+      FlutterSecureStorage.setMockInitialValues(<String, String>{
         'truxify_driver_cached_trips': 'not valid json',
       });
 
@@ -78,7 +85,7 @@ void main() {
     });
 
     test('load handles non-list trips JSON gracefully', () async {
-      SharedPreferences.setMockInitialValues(<String, Object>{
+      FlutterSecureStorage.setMockInitialValues(<String, String>{
         'truxify_driver_cached_trips': '{"not": "a list"}',
       });
 
@@ -87,7 +94,7 @@ void main() {
     });
 
     test('load handles corrupt section JSON gracefully', () async {
-      SharedPreferences.setMockInitialValues(<String, Object>{
+      FlutterSecureStorage.setMockInitialValues(<String, String>{
         'truxify_driver_cached_trips': jsonEncode(trips),
         'truxify_driver_cached_trip_stops': 'not valid json',
       });
@@ -99,7 +106,7 @@ void main() {
     });
 
     test('load clears expired cache', () async {
-      SharedPreferences.setMockInitialValues(<String, Object>{
+      FlutterSecureStorage.setMockInitialValues(<String, String>{
         'truxify_driver_cached_trips': jsonEncode(trips),
         'truxify_driver_cached_trips_saved_at':
             DateTime.now().subtract(const Duration(hours: 25)).toIso8601String(),
@@ -108,8 +115,10 @@ void main() {
       final snapshot = await TripCache.load();
       expect(snapshot, isNull);
 
-      final prefs = await SharedPreferences.getInstance();
-      expect(prefs.getString('truxify_driver_cached_trips'), isNull);
+      expect(
+        await SecureStorage.read('truxify_driver_cached_trips'),
+        isNull,
+      );
     });
   });
 }

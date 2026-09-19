@@ -165,6 +165,7 @@ contract AssetToken is ERC20, ERC20Burnable, Ownable, Pausable, ReentrancyGuard 
         uint256 assetId,
         uint256 amount
     ) external payable nonReentrant whenNotPaused {
+        require(isCompliant[msg.sender], "Buyer not compliant");
         require(assetExists[assetId], "Asset not found");
         Asset storage asset = assets[assetId];
         require(asset.isActive, "Asset not active");
@@ -284,6 +285,7 @@ contract AssetToken is ERC20, ERC20Burnable, Ownable, Pausable, ReentrancyGuard 
         uint256 price,
         string memory orderType
     ) external whenNotPaused {
+        require(isCompliant[msg.sender], "Sender not compliant");
         require(assetExists[assetId], "Asset not found");
         require(amount >= MIN_TRADE_AMOUNT, "Amount too small");
         require(amount <= MAX_TRADE_AMOUNT, "Amount too large");
@@ -332,6 +334,7 @@ contract AssetToken is ERC20, ERC20Burnable, Ownable, Pausable, ReentrancyGuard 
         uint256 assetId,
         uint256 orderIndex
     ) external payable nonReentrant whenNotPaused {
+        require(isCompliant[msg.sender], "Buyer not compliant");
         require(assetExists[assetId], "Asset not found");
         require(orderIndex < tradeOrders[assetId].length, "Order not found");
 
@@ -364,10 +367,13 @@ contract AssetToken is ERC20, ERC20Burnable, Ownable, Pausable, ReentrancyGuard 
         order.buyer = msg.sender;
         order.isActive = false;
 
-        // Transfer payment
+        // Transfer payment to seller (push with fallback to claimable balance)
         {
             (bool paid, ) = payable(order.seller).call{value: totalCost}("");
-            require(paid, "Payment to seller failed");
+            if (!paid) {
+                claimableBalances[order.seller] += totalCost;
+                emit PayoutAccrued(assetId, order.seller, totalCost);
+            }
         }
 
         // Refund excess payment
@@ -383,7 +389,7 @@ contract AssetToken is ERC20, ERC20Burnable, Ownable, Pausable, ReentrancyGuard 
     function cancelTradeOrder(
         uint256 assetId,
         uint256 orderIndex
-    ) external {
+    ) external nonReentrant {
         require(assetExists[assetId], "Asset not found");
         require(orderIndex < tradeOrders[assetId].length, "Order not found");
 
@@ -428,6 +434,7 @@ contract AssetToken is ERC20, ERC20Burnable, Ownable, Pausable, ReentrancyGuard 
         address to,
         uint256 amount
     ) external whenNotPaused {
+        require(isCompliant[msg.sender], "Sender not compliant");
         require(assetExists[assetId], "Asset not found");
         require(to != address(0), "Invalid recipient");
         require(amount > 0, "Amount must be > 0");

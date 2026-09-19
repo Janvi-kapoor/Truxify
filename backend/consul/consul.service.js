@@ -158,6 +158,7 @@ class ConsulService {
         this._healthInterval = setInterval(async () => {
             await this.checkAllServices();
         }, 30000); // Every 30 seconds
+        this._healthInterval.unref();
     }
 
     stopHealthChecks() {

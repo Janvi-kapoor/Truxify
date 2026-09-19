@@ -135,7 +135,7 @@ class TripService {
   Future<List<Map<String, dynamic>>> fetchTripItems(
     String tripDisplayId,
   ) async {
-    final path = '/api/trips/${_encodePathSegment(tripDisplayId)}/items';
+    final path = '/api/driver/trips/${_encodePathSegment(tripDisplayId)}/items';
     try {
       final body = await _apiClient.get(path);
       if (body is! List) {

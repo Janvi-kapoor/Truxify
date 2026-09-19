@@ -1,10 +1,14 @@
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+import 'secure_storage.dart';
 
 /// Caches the most recently loaded trip list locally so drivers can still
 /// see delivery details, stops, and route points when the network is
 /// unavailable mid-trip.
+///
+/// Trip data contains PII (customer addresses, drop locations) and financial
+/// data (payouts), so it is persisted via OS-backed secure storage rather
+/// than plaintext SharedPreferences (issue #14936).
 class TripCache {
   static const String _tripsKey = 'truxify_driver_cached_trips';
   static const String _stopsKey = 'truxify_driver_cached_trip_stops';
@@ -41,13 +45,13 @@ class TripCache {
     }
   }
 
-  static Future<void> _clear(SharedPreferences prefs) async {
+  static Future<void> _clear() async {
     await Future.wait([
-      prefs.remove(_tripsKey),
-      prefs.remove(_stopsKey),
-      prefs.remove(_routePointsKey),
-      prefs.remove(_itemsKey),
-      prefs.remove(_savedAtKey),
+      SecureStorage.delete(_tripsKey),
+      SecureStorage.delete(_stopsKey),
+      SecureStorage.delete(_routePointsKey),
+      SecureStorage.delete(_itemsKey),
+      SecureStorage.delete(_savedAtKey),
     ]);
   }
 
@@ -57,18 +61,16 @@ class TripCache {
     required Map<String, List<Map<String, dynamic>>> routePointsByTripId,
     required Map<String, List<Map<String, dynamic>>> itemsByTripId,
   }) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_tripsKey, jsonEncode(trips));
-    await prefs.setString(_stopsKey, jsonEncode(stopsByTripId));
-    await prefs.setString(_routePointsKey, jsonEncode(routePointsByTripId));
-    await prefs.setString(_itemsKey, jsonEncode(itemsByTripId));
-    await prefs.setString(_savedAtKey, DateTime.now().toIso8601String());
+    await SecureStorage.save(_tripsKey, jsonEncode(trips));
+    await SecureStorage.save(_stopsKey, jsonEncode(stopsByTripId));
+    await SecureStorage.save(_routePointsKey, jsonEncode(routePointsByTripId));
+    await SecureStorage.save(_itemsKey, jsonEncode(itemsByTripId));
+    await SecureStorage.save(_savedAtKey, DateTime.now().toIso8601String());
   }
 
   /// Returns cached trip data, or null if nothing has been cached yet.
   static Future<TripCacheSnapshot?> load() async {
-    final prefs = await SharedPreferences.getInstance();
-    final tripsRaw = prefs.getString(_tripsKey);
+    final tripsRaw = await SecureStorage.read(_tripsKey);
     if (tripsRaw == null) {
       return null;
     }
@@ -79,16 +81,18 @@ class TripCache {
             .map((e) => Map<String, dynamic>.from(e as Map)),
       );
 
-      final stopsByTripId = _decodeTripSections(prefs.getString(_stopsKey));
-      final routePointsByTripId =
-          _decodeTripSections(prefs.getString(_routePointsKey));
-      final itemsByTripId = _decodeTripSections(prefs.getString(_itemsKey));
+      final stopsByTripId = _decodeTripSections(
+          await SecureStorage.read(_stopsKey));
+      final routePointsByTripId = _decodeTripSections(
+          await SecureStorage.read(_routePointsKey));
+      final itemsByTripId = _decodeTripSections(
+          await SecureStorage.read(_itemsKey));
 
-      final savedAtRaw = prefs.getString(_savedAtKey);
+      final savedAtRaw = await SecureStorage.read(_savedAtKey);
       final savedAt = savedAtRaw != null ? DateTime.tryParse(savedAtRaw) : null;
 
       if (savedAt != null && DateTime.now().difference(savedAt) > _ttl) {
-        await _clear(prefs);
+        await _clear();
         return null;
       }
 

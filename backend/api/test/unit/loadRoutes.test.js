@@ -21,13 +21,15 @@ vi.mock('../../src/middleware/validate.js', () => ({
   validateQuery: () => (_req, _res, next) => next(),
 }));
 
-const { dbMock } = vi.hoisted(() => ({
-  dbMock: { supabaseAdmin: { from: vi.fn() } },
+const { dbMock, redisMock } = vi.hoisted(() => ({
+  dbMock: { supabaseAdmin: { from: vi.fn(), rpc: vi.fn() } },
+  redisMock: { get: vi.fn(), set: vi.fn() },
 }));
 
 vi.mock('../../src/config/db.js', () => ({
   get supabaseAdmin() { return dbMock.supabaseAdmin; },
   get supabase() { return null; },
+  get redisClient() { return redisMock; },
 }));
 
 vi.mock('../../src/lib/escapeLike.js', () => ({
@@ -104,6 +106,87 @@ describe('loadRoutes', () => {
       const res = await request(makeApp()).get('/loads/');
       expect(res.status).toBe(500);
       expect(res.body.error).toBe('Failed to fetch load offers.');
+    });
+  });
+
+  describe('GET /loads/stats', () => {
+    it('returns cached stats from Redis if available', async () => {
+      const cachedStats = {
+        vehicleType: 'all',
+        activeLoads: 10,
+        avgFreightPrice: 5000,
+        minFreightPrice: 2000,
+        maxFreightPrice: 15000,
+        avgDistance: 250,
+        nearbyLoads: 4,
+        lastUpdated: '2026-07-04T08:30:00Z',
+      };
+      redisMock.get.mockResolvedValue(JSON.stringify(cachedStats));
+
+      const res = await request(makeApp()).get('/loads/stats');
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.activeLoads).toBe(10);
+      expect(res.body.avgFreightPrice).toBe(5000);
+      expect(redisMock.get).toHaveBeenCalledWith('loads:stats:all');
+    });
+
+    it('returns stats via Supabase RPC get_load_stats when Redis misses', async () => {
+      redisMock.get.mockResolvedValue(null);
+      const rpcData = {
+        vehicleType: 'mini_truck',
+        activeLoads: 47,
+        avgFreightPrice: 4820,
+        minFreightPrice: 1200,
+        maxFreightPrice: 12000,
+        avgDistance: 283,
+        nearbyLoads: 12,
+        lastUpdated: '2026-07-04T08:30:00Z',
+      };
+      dbMock.supabaseAdmin.rpc.mockResolvedValue({ data: rpcData, error: null });
+
+      const res = await request(makeApp())
+        .get('/loads/stats')
+        .query({ vehicleType: 'mini_truck' });
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.vehicleType).toBe('mini_truck');
+      expect(res.body.activeLoads).toBe(47);
+      expect(dbMock.supabaseAdmin.rpc).toHaveBeenCalledWith('get_load_stats', {
+        p_vehicle_type: 'mini_truck',
+      });
+      expect(redisMock.set).toHaveBeenCalledWith(
+        'loads:stats:mini_truck',
+        JSON.stringify(rpcData),
+        'EX',
+        60
+      );
+    });
+
+    it('falls back to DB aggregation if RPC is unavailable or fails', async () => {
+      redisMock.get.mockResolvedValue(null);
+      dbMock.supabaseAdmin.rpc.mockResolvedValue({ data: null, error: { message: 'function not found' } });
+
+      const rows = [
+        { freight_value: 500000, extra_distance_km: 100 }, // 5000 INR, 100 km
+        { freight_value: 300000, extra_distance_km: 20 },  // 3000 INR, 20 km (nearby)
+      ];
+      const q = chain({ data: rows, error: null });
+      q.eq.mockReturnValue(Promise.resolve({ data: rows, error: null }));
+      dbMock.supabaseAdmin.from.mockReturnValue(q);
+
+      const res = await request(makeApp()).get('/loads/stats');
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.activeLoads).toBe(2);
+      expect(res.body.avgFreightPrice).toBe(4000);
+      expect(res.body.minFreightPrice).toBe(3000);
+      expect(res.body.maxFreightPrice).toBe(5000);
+      expect(res.body.avgDistance).toBe(60);
+      expect(res.body.nearbyLoads).toBe(1);
     });
   });
 

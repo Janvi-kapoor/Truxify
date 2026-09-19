@@ -257,6 +257,58 @@ describe('tracker first-frame WebSocket auth (issue #5739)', () => {
     expect(ws.authenticated).toBe(false);
     expect(ws.close).toHaveBeenCalledWith(4001, 'Unauthorized: Firebase Auth is not configured');
   });
+
+  it('queues messages arriving while auth is in-flight and processes them upon successful auth', async () => {
+    dbMock.authUser = { id: 'sb-user-1' };
+    dbMock.store.profiles = [{ id: 'sb-user-1', firebase_uid: 'fb-uid-1', role: 'driver', is_active: true }];
+    const sentMessages = [];
+    const ws = pendingSocket(sentMessages);
+    ws.readyState = 1;
+
+    // Simulate auth in-flight by initiating auth call and immediately sending a second message
+    const authPromise = handleTrackingMessage(ws, JSON.stringify({
+      event: 'auth',
+      data: { token: supabaseJwt },
+    }));
+
+    // Next message arrives while isAuthenticating is true
+    const pingPromise = handleTrackingMessage(ws, JSON.stringify({
+      event: 'subscribe_tracking',
+      data: { driver_id: 'sb-user-1' },
+    }));
+
+    await Promise.all([authPromise, pingPromise]);
+
+    expect(ws.authenticated).toBe(true);
+    expect(ws.isAuthenticating).toBe(false);
+    expect(sentMessages).toEqual([
+      { status: 'authenticated', user_id: 'sb-user-1' },
+      { status: 'subscribed', target: 'sb-user-1', reconnect_supported: true },
+    ]);
+  });
+
+  it('clears queued messages and does not process them if auth fails', async () => {
+    const sentMessages = [];
+    const ws = pendingSocket(sentMessages);
+    ws.readyState = 1;
+
+    const authPromise = handleTrackingMessage(ws, JSON.stringify({
+      event: 'auth',
+      data: { token: 'invalid-token' },
+    }));
+
+    const queuedMsgPromise = handleTrackingMessage(ws, JSON.stringify({
+      event: 'subscribe_tracking',
+      data: { driver_id: 'sb-user-1' },
+    }));
+
+    await Promise.all([authPromise, queuedMsgPromise]);
+
+    expect(ws.authenticated).toBe(false);
+    expect(ws.isAuthenticating).toBe(false);
+    expect(ws.pendingAuthQueue).toEqual([]);
+    expect(ws.close).toHaveBeenCalledWith(4001, 'Unauthorized: Firebase Auth is not configured');
+  });
 });
 
 describe('tracker WebSocket heartbeat messages', () => {
@@ -878,6 +930,30 @@ describe('handleLocationPing - main telemetry flow', () => {
       latitude: 12.9,
       longitude: 77.5,
       device_timestamp: new Date().toISOString(),
+    });
+
+    expect(ws.send).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['string NaN', 'NaN'],
+    ['string Infinity', 'Infinity'],
+    ['string -Infinity', '-Infinity'],
+    ['literal NaN', NaN],
+    ['literal Infinity', Infinity],
+    ['literal -Infinity', -Infinity],
+  ])('handles non-finite device_timestamp (%s) gracefully', async (_, ts) => {
+    const ws = {
+      driverId: 'driver-1',
+      user: { id: 'driver-1', role: 'driver' },
+      send: vi.fn(),
+    };
+
+    await handleLocationPing(ws, {
+      driver_id: 'driver-1',
+      latitude: 12.9,
+      longitude: 77.5,
+      device_timestamp: ts,
     });
 
     expect(ws.send).not.toHaveBeenCalled();

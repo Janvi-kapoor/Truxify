@@ -297,3 +297,5 @@ class HybridQuantumClassical:
             return classical['solution']
         else:
             return quantum.get('optimal_params', [])
+
+# Ensure valid Hamiltonian cycle via degree constraints

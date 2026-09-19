@@ -95,3 +95,17 @@ describe('isValidProfile', () => {
   });
 });
 
+describe('invalidateProfileCache', () => {
+  it('exports invalidateProfileCache function', async () => {
+    const { invalidateProfileCache } = await import('../../src/lib/profileCache.js');
+    expect(typeof invalidateProfileCache).toBe('function');
+  });
+
+  it('handles null or empty userId gracefully without throwing', async () => {
+    const { invalidateProfileCache } = await import('../../src/lib/profileCache.js');
+    await expect(invalidateProfileCache(null)).resolves.toBeUndefined();
+    await expect(invalidateProfileCache('')).resolves.toBeUndefined();
+  });
+});
+
+

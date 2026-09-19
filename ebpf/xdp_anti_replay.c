@@ -19,8 +19,12 @@ struct anti_replay_entry {
     struct bpf_spin_lock lock; // Serializes read-modify-write of last_seq/window across CPUs
 };
 
+// BPF Map: Per-flow anti-replay sequence tracking.
+// BPF_MAP_TYPE_HASH supports bpf_spin_lock (LRU_HASH does not), so the verifier
+// accepts the program. Userspace sweeps/monitoring can prune idle flows to
+// maintain available capacity under traffic churn.
 struct {
-    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 10000);
     __type(key, __u64); // Flow key: src_ip (upper 32 bits) | src_port (lower 16 bits)
     __type(value, struct anti_replay_entry);
@@ -51,7 +55,7 @@ int xdp_anti_replay_filter(struct xdp_md *ctx) {
 
     // Per-flow key keeps the full (src_ip, src_port) tuple in a 64-bit key so that
     // distinct flows behind one NAT or from one GPS device never collide.
-    __u64 flow_key = ((__u64)ip->saddr << 16) | udp->source;
+    __u64 flow_key = ((__u64)ip->saddr << 32) | (__u64)udp->source;
 
     // Sequence number is the first 4 bytes of the UDP payload (network order).
     __u32 *seq_ptr = (void *)(udp + 1);
@@ -67,7 +71,9 @@ int xdp_anti_replay_filter(struct xdp_md *ctx) {
             .window = 1,
             .lock = {},
         };
-        bpf_map_update_elem(&seq_tracking_map, &flow_key, &new_entry, BPF_ANY);
+        if (bpf_map_update_elem(&seq_tracking_map, &flow_key, &new_entry, BPF_ANY) != 0) {
+            return XDP_DROP;
+        }
         return XDP_PASS;
     }
 

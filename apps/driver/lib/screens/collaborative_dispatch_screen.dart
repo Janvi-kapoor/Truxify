@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+﻿import 'package:flutter/material.dart';
 import '../models/collaborative_dispatch_model.dart';
 import '../services/collaborative_dispatch_service.dart';
 
@@ -153,7 +153,12 @@ class _CollaborativeDispatchScreenState extends State<CollaborativeDispatchScree
   }
 
   Widget _buildMockCursor(DispatchCursor c) {
-    Color cursorColor = Color(int.parse(c.colorHex));
+        // Safe color parsing to prevent crashes on untrusted/malformed backend color strings (#14933)
+    final cleanedHex = c.colorHex?.replaceAll('#', '') ?? '';
+    final parsedColorValue = int.tryParse(cleanedHex, radix: 16);
+    final Color cursorColor = parsedColorValue != null 
+        ? Color(parsedColorValue | 0xFF000000) 
+        : Colors.blueGrey;
     
     // Using a tween to make the mock cursor 'float' a bit
     return Positioned(

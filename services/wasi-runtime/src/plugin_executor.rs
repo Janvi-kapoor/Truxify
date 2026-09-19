@@ -83,7 +83,13 @@ impl WasiPluginExecutor {
                 (out_cap.min(i32::MAX as usize)) as i32,
             ),
         ) {
-            Ok(len) => len,
+            Ok(len) if len < 0 => {
+                anyhow::bail!("plugin returned negative output length");
+            }
+            Ok(len) => len as usize,
+            // A fuel-exhaustion trap means the plugin exceeded its instruction
+            // budget (e.g. an infinite loop). Surface it as a clear error
+            // instead of letting the call hang forever.
             Err(e) if matches!(e, Trap::OutOfFuel) => {
                 anyhow::bail!("plugin exceeded instruction/fuel limit (possible infinite loop)")
             }

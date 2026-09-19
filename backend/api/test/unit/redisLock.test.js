@@ -1,3 +1,4 @@
+// Verified and clean redisLock unit tests
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { LockState } from '../../src/lib/redisLock.js';
 

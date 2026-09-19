@@ -1,4 +1,4 @@
-import shardManager from '../services/sharding/ShardManager.js';
+﻿import shardManager from '../services/sharding/ShardManager.js';
 import logger from './logger.js';
 import { validateCoordinateRange } from '../utils/coordinates.js';
 
@@ -29,6 +29,11 @@ export const shardMiddleware = async (req, res, next) => {
     const rawLng = firstDefined(req.query.lng, req.body?.lng);
 
     if (rawLat !== undefined && rawLat !== null || rawLng !== undefined && rawLng !== null) {
+      if (rawLat === undefined || rawLng === undefined) {
+        return res.status(400).json({
+          error: 'lat and lng are both required when routing by location'
+        });
+      }
       const parsedLat = parseCoordinate(rawLat);
       const parsedLng = parseCoordinate(rawLng);
 

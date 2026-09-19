@@ -1,18 +1,21 @@
-import { supabase } from '../../api/src/config/db.js';
+import { supabaseAdmin } from '../../api/src/config/db.js';
 import logger from '../../api/src/middleware/logger.js';
 
 class EventRepository {
   async saveEvent(event) {
     try {
-      const { data, error } = await supabase
+      const metadata = event.metadata ?? {};
+      const timestamp = event.timestamp ?? metadata.timestamp ?? new Date().toISOString();
+
+      const { data, error } = await supabaseAdmin
         .from('events')
         .insert([{
           event_id: event.eventId,
           event_type: event.eventType,
           order_id: event.orderId,
           data: event.data,
-          metadata: event.metadata,
-          timestamp: event.metadata.timestamp,
+          metadata,
+          timestamp,
         }])
         .select()
         .single();
@@ -27,7 +30,7 @@ class EventRepository {
 
   async getEventsByOrderId(orderId, limit = 100) {
     try {
-      const query = supabase
+      const query = supabaseAdmin
         .from('events')
         .select('*')
         .eq('order_id', orderId)
@@ -48,7 +51,7 @@ class EventRepository {
 
   async getAllEventsByOrderId(orderId) {
     try {
-      const { data, error } = await supabase
+      const { data, error } = await supabaseAdmin
         .from('events')
         .select('*')
         .eq('order_id', orderId)
@@ -65,7 +68,7 @@ class EventRepository {
 
   async getEventsByType(eventType, limit = 100) {
     try {
-      const { data, error } = await supabase
+      const { data, error } = await supabaseAdmin
         .from('events')
         .select('*')
         .eq('event_type', eventType)
@@ -82,7 +85,7 @@ class EventRepository {
 
   async getEventById(eventId) {
     try {
-      const { data, error } = await supabase
+      const { data, error } = await supabaseAdmin
         .from('events')
         .select('*')
         .eq('event_id', eventId)
@@ -195,13 +198,13 @@ class EventRepository {
       return snapshot;
     } catch (error) {
       logger.error('Failed to get snapshot:', error);
-      return null;
+      throw error;
     }
   }
 
   async getEventStats() {
     try {
-      const { data, error } = await supabase
+      const { data, error } = await supabaseAdmin
         .from('events')
         .select('event_type');
 
@@ -236,4 +239,3 @@ export async function insertEventsWithTransaction(client, events) {
     throw err;
   }
 }
-

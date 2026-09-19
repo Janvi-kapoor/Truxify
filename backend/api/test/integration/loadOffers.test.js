@@ -77,10 +77,21 @@ describe('Load Offers Routes Integration Tests', () => {
         .set(DRIVER_HEADERS);
 
       expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
       expect(res.body.loads).toHaveLength(1);
+      expect(res.body.data).toHaveLength(1);
       expect(res.body.total).toBe(1);
       expect(res.body.page).toBe(1);
       expect(res.body.limit).toBe(10);
+      expect(res.body.totalPages).toBe(1);
+      expect(res.body.hasNextPage).toBe(false);
+      expect(res.body.pagination).toEqual({
+        page: 1,
+        limit: 10,
+        total: 1,
+        totalPages: 1,
+        hasNextPage: false,
+      });
       
       const load = res.body.loads[0];
       expect(load.id).toBe('load-1');
@@ -88,6 +99,45 @@ describe('Load Offers Routes Integration Tests', () => {
       expect(load.destination).toBe('Bangalore City');
       expect(load.estimated_price).toBe(12000);
       expect(load.vehicle_type).toBe('Truck');
+    });
+
+    it('correctly calculates hasNextPage and totalPages for multi-page results', async () => {
+      // Simulate 25 load offers in store
+      for (let i = 1; i <= 25; i++) {
+        m.store.load_offers.push({
+          id: `load-${i}`,
+          pickup_address: `Origin ${i}`,
+          drop_address: `Destination ${i}`,
+          freight_value: 100000,
+          status: 'available',
+          goods_type: 'General'
+        });
+      }
+
+      // Page 1 with limit 10: hasNextPage should be true
+      const resPage1 = await request(buildApp())
+        .get('/api/loads?page=1&limit=10')
+        .set(DRIVER_HEADERS);
+
+      expect(resPage1.status).toBe(200);
+      expect(resPage1.body.page).toBe(1);
+      expect(resPage1.body.limit).toBe(10);
+      expect(resPage1.body.total).toBe(25);
+      expect(resPage1.body.totalPages).toBe(3);
+      expect(resPage1.body.hasNextPage).toBe(true);
+      expect(resPage1.body.pagination.hasNextPage).toBe(true);
+
+      // Page 3 with limit 10: last page, hasNextPage should be false
+      const resPage3 = await request(buildApp())
+        .get('/api/loads?page=3&limit=10')
+        .set(DRIVER_HEADERS);
+
+      expect(resPage3.status).toBe(200);
+      expect(resPage3.body.page).toBe(3);
+      expect(resPage3.body.total).toBe(25);
+      expect(resPage3.body.totalPages).toBe(3);
+      expect(resPage3.body.hasNextPage).toBe(false);
+      expect(resPage3.body.pagination.hasNextPage).toBe(false);
     });
 
     it('rejects invalid pagination parameters', async () => {
@@ -226,6 +276,16 @@ describe('Load Offers Routes Integration Tests', () => {
 
       expect(res.status).toBe(400);
       expect(res.body.error).toBe('destination too long (max 200 chars)');
+    });
+
+    it('rejects repeated pickup_location filters instead of taking the first value', async () => {
+      const res = await request(buildApp())
+        .get('/api/loads?pickup_location=Chennai&pickup_location=Mumbai')
+        .set(DRIVER_HEADERS);
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('Repeated pickup_location parameters are not allowed');
+      expect(m.calls.find(call => call.table === 'load_offers')).toBeUndefined();
     });
 
     it('rejects repeated numeric filters instead of accepting an array', async () => {

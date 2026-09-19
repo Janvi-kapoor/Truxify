@@ -134,26 +134,47 @@ class GeocodeService {
   }
 
   /// Search for autocomplete suggestions.
-  static Future<List<String>> autocomplete(String query) async {
-    if (query.trim().isEmpty) return [];
+  ///
+  /// An optional [client] can be provided for test-injection.
+  static Future<List<String>> autocomplete(
+    String query, {
+    http.Client? client,
+  }) async {
+    final trimmed = query.trim();
+    if (trimmed.isEmpty) return [];
     final uri = Uri.https(
       'nominatim.openstreetmap.org',
       '/search',
-      <String, String>{'q': query, 'format': 'jsonv2', 'limit': '5'},
+      <String, String>{'q': trimmed, 'format': 'jsonv2', 'limit': '5'},
     );
+    const headers = <String, String>{
+      'Accept': 'application/json',
+      'User-Agent': 'Truxify-Driver-App',
+    };
     try {
-      final resp = await http
-          .get(uri, headers: const {
-            'Accept': 'application/json',
-            'User-Agent': 'Truxify-Driver-App',
-          })
-          .timeout(const Duration(seconds: 4));
+      final http.Response resp;
+      if (client != null) {
+        resp = await client
+            .get(uri, headers: headers)
+            .timeout(const Duration(seconds: 4));
+      } else {
+        resp = await http
+            .get(uri, headers: headers)
+            .timeout(const Duration(seconds: 4));
+      }
       if (resp.statusCode != 200) return [];
       final decoded = jsonDecode(resp.body) as List<dynamic>?;
       if (decoded == null) return [];
       return decoded
-          .map((e) => (e as Map<String, dynamic>)['display_name'] as String? ?? '')
-          .where((s) => s.isNotEmpty)
+          .map((item) {
+            if (item is! Map<String, dynamic>) return null;
+            final raw = item['display_name'];
+            if (raw is! String) return null;
+            final displayName = raw.trim();
+            if (displayName.isEmpty) return null;
+            return displayName;
+          })
+          .whereType<String>()
           .toList();
     } catch (e) {
       debugPrint('[GeocodeService] autocomplete failed for "$query": $e');

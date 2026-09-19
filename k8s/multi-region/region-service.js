@@ -2,13 +2,17 @@ import axios from 'axios';
 import logger from '../../backend/api/src/middleware/logger.js';
 import { supabase } from '../../backend/api/src/config/db.js';
 import Redis from 'ioredis';
+import { parseRegionsConfig } from './region-config.js';
 
-class RegionService {
+export class RegionService {
     constructor() {
         this.regions = [];
         this.activeRegions = [];
         this.primaryRegion = null;
         this._healthInterval = null;
+        this._healthCheckInProgress = false;
+        this._replicationInterval = null;
+        this._stopped = false;
         this.redis = new Redis(process.env.REDIS_URL || 'redis://localhost:6379');
         
         // Load region config
@@ -27,15 +31,11 @@ class RegionService {
         let config;
         if (process.env.REGIONS) {
             try {
-                config = JSON.parse(process.env.REGIONS);
+                config = parseRegionsConfig(process.env.REGIONS);
             } catch (err) {
-                logger.error(`Invalid REGIONS env var (must be valid JSON). Value: ${process.env.REGIONS}`);
-                logger.error(`JSON parse error: ${err.message}`);
+                logger.error(`Invalid REGIONS env var: ${err.message}`);
                 process.exit(1);
-            }
-            if (!Array.isArray(config)) {
-                logger.error(`REGIONS env var must be a JSON array of region objects. Value: ${process.env.REGIONS}`);
-                process.exit(1);
+                return;
             }
         } else {
             config = [
@@ -73,19 +73,32 @@ class RegionService {
     // ============ Health Checks ============
 
     async startHealthChecks() {
-        if (this._healthInterval) clearInterval(this._healthInterval);
+        if (this._stopped || this._healthInterval) return;
         this._healthInterval = setInterval(async () => {
-            await this.checkAllRegions();
+            if (this._stopped || this._healthCheckInProgress) return;
+
+            this._healthCheckInProgress = true;
+            try {
+                await this.checkAllRegions();
+            } catch (error) {
+                logger.error('Health check cycle failed:', error);
+            } finally {
+                this._healthCheckInProgress = false;
+            }
         }, 10000); // Every 10 seconds
     }
 
     async checkAllRegions() {
+        if (this._stopped) return {};
         const results = {};
         
         for (const region of this.regions) {
+            if (this._stopped) return results;
             results[region.name] = await this.checkRegionHealth(region);
         }
         
+        if (this._stopped) return results;
+
         // Update active regions
         const previousActive = this.activeRegions.map(r => r.name);
         this.activeRegions = this.regions.filter(r => results[r.name].healthy);
@@ -96,9 +109,11 @@ class RegionService {
         const recovered = currentActive.filter(c => !previousActive.includes(c));
 
         if (failed.length > 0 || recovered.length > 0) {
-            await this.handleFailover(previousActive, this.activeRegions);
+            await this.handleFailover(previousActive, currentActive);
         }
         
+        if (this._stopped) return results;
+
         // Cache health status
         await this.redis.setex(
             'regions:health',
@@ -135,11 +150,34 @@ class RegionService {
     // ============ Failover ============
 
     async handleFailover(previous, current) {
-        logger.warn(`⚠️ Failover detected! Previous: ${previous.join(', ')} -> Current: ${current.join(', ')}`);
+        const currentNames = current.map(region =>
+            typeof region === 'string' ? region : region.name
+        );
+
+        logger.warn(`⚠️ Failover detected! Previous: ${previous.join(', ')} -> Current: ${currentNames.join(', ')}`);
         
         // Find failed regions
-        const failed = previous.filter(p => !current.includes(p));
-        const recovered = current.filter(c => !previous.includes(c));
+        const failed = previous.filter(p => !currentNames.includes(p));
+        const recovered = currentNames.filter(c => !previous.includes(c));
+
+        // Promote a healthy region when the current replication primary fails.
+        const primaryFailed = this.primaryRegion && failed.includes(this.primaryRegion.name);
+        if (primaryFailed && currentNames.length > 0) {
+            const promotedPrimaryName = currentNames[0];
+            const promotedPrimary =
+                current.find(region => typeof region !== 'string' && region.name === promotedPrimaryName) ||
+                this.regions.find(region => region.name === promotedPrimaryName);
+
+            if (promotedPrimary) {
+                this.primaryRegion = promotedPrimary;
+
+                this.regions.forEach(region => {
+                    region.primary = region.name === promotedPrimary.name;
+                });
+
+                logger.warn(`🔄 Promoted ${promotedPrimary.name} to replication primary`);
+            }
+        }
         
         // Update DNS (in production: Route53)
         if (failed.length > 0) {
@@ -152,7 +190,7 @@ class RegionService {
         // Store failover event
         await this.storeFailoverEvent({
             previous,
-            current,
+            current: currentNames,
             failed,
             recovered,
             timestamp: new Date().toISOString()
@@ -199,30 +237,67 @@ class RegionService {
     // ============ Data Replication ============
 
     async startDataReplication() {
-        setInterval(async () => {
+        if (this._stopped || this._replicationInterval) return;
+        this._replicationInterval = setInterval(async () => {
+            if (this._stopped) return;
             await this.replicateData();
         }, 5000); // Every 5 seconds
     }
 
+    async stop() {
+        if (this._stopped) return;
+        this._stopped = true;
+
+        if (this._healthInterval) {
+            clearInterval(this._healthInterval);
+            this._healthInterval = null;
+        }
+
+        if (this._replicationInterval) {
+            clearInterval(this._replicationInterval);
+            this._replicationInterval = null;
+        }
+
+        if (this.redis) {
+            if (typeof this.redis.quit === 'function') {
+                await this.redis.quit();
+            } else if (typeof this.redis.disconnect === 'function') {
+                this.redis.disconnect();
+            }
+        }
+    }
+
     async replicateData() {
         try {
+            if (this._stopped) return;
+
             // Get data from primary region
             if (!this.primaryRegion) return;
             
             const data = await this.fetchDataFromRegion(this.primaryRegion);
+            if (this._stopped) return;
+            if (data === null) {
+                logger.warn(`Skipping replication because no data was fetched from primary region ${this.primaryRegion.name}`);
+                return;
+            }
             
             // Replicate to other regions
             for (const region of this.regions) {
+                if (this._stopped) return;
                 if (region.name === this.primaryRegion.name) continue;
                 
                 await this.replicateToRegion(region, data);
             }
             
-            logger.info(`✅ Data replicated to ${this.regions.length - 1} regions`);
+            if (!this._stopped) {
+                logger.info(`✅ Data replicated to ${this.regions.length - 1} regions`);
+            }
         } catch (error) {
             logger.error('Data replication failed:', error);
-            await this.redis.incr('replication:global:error_count');
-            await this.redis.set('replication:global:last_error', new Date().toISOString());
+            if (!this._stopped) {
+                await this.redis.incr('replication:global:error_count');
+                await this.redis.set('replication:global:last_error', new Date().toISOString());
+            }
         }
     }
 
@@ -242,10 +317,10 @@ class RegionService {
             await this.redis.set(`replication:${region.name}:last_sync`, Date.now());
         } catch (error) {
             logger.error(`Failed to replicate to ${region.name}:`, error);
+            await this.redis.incr(`replication:${region.name}:error_count`);
+            await this.redis.set(`replication:${region.name}:last_error`, new Date().toISOString());
+            throw error;
         }
-        await this.redis.incr(`replication:${region.name}:error_count`);
-        await this.redis.set(`replication:${region.name}:last_error`, new Date().toISOString());
-        throw lastError;
     }
 
     // ============ Database Operations ============
@@ -280,30 +355,23 @@ class RegionService {
         }
         
         const health = await this.redis.get('regions:health');
-        
-        return {
-            regions: this.regions.map(r => ({
-                ...r,
-                routingCount: routingStats[r.name] || 0,
-                status: health ? JSON.parse(health)[r.name] : null
-            })),
-            activeRegions: this.activeRegions.map(r => r.name),
-            primaryRegion: this.primaryRegion?.name,
-            timestamp: new Date().toISOString()
-        };
-    }
+        metrics.routing = routingStats;
 
-    async getReplicationLag() {
-        const lag = {};
-        for (const region of this.regions) {
-            if (region.name === this.primaryRegion?.name) continue;
-            
-            const lastSync = await this.redis.get(`replication:${region.name}:last_sync`);
-            if (lastSync) {
-                lag[region.name] = Date.now() - parseInt(lastSync, 10);
+        if (!health) {
+            metrics.health = {};
+        } else {
+            try {
+                const parsedHealth = JSON.parse(health);
+                metrics.health = parsedHealth && typeof parsedHealth === 'object' && !Array.isArray(parsedHealth)
+                    ? parsedHealth
+                    : {};
+            } catch (error) {
+                logger.warn('Invalid cached region health data; using empty health metrics.', error);
+                metrics.health = {};
             }
         }
-        return lag;
+        
+        return metrics;
     }
 }
 
