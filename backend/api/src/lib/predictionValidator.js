@@ -57,8 +57,8 @@ const DEFAULT_PRICE_BAND_RATIO = 0.15;
  * @returns {{ ok: true, validated: ValidatedPrice } | { ok: false, reason: string, detail: string }}
  */
 export function validatePricePrediction(raw) {
-  // ── Null / undefined ────────────────────────────────────────────────
-  if (raw === null || raw === undefined) {
+  // ── Null / undefined guard ──────────────────────────────────────────
+  if (!raw || raw === null || raw === undefined) {
     return reject(RejectionReason.NULL_RESPONSE, 'Prediction response is null or undefined');
   }
 
@@ -167,4 +167,8 @@ function roundPrice(value) {
   return Math.round(value * 100) / 100;
 }
 
+export const validatePrediction = validatePricePrediction;
+
 export const __testing = { MIN_PRICE_INR, MAX_PRICE_INR, MAX_BAND_RATIO };
+
+export default validatePricePrediction;

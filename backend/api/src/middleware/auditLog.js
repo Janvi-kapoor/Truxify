@@ -1,4 +1,4 @@
-// ============================================================================
+﻿// ============================================================================
 // FILE: src/middleware/auditLogMiddleware.js
 // Description: Enterprise Audit Logging Middleware & State Interceptor
 // ============================================================================
@@ -122,6 +122,9 @@ function computeStateDiff(before, after) {
 /**
  * Resolves the resource type from policy action or URI pattern.
  */
+/**
+ * @internal Internal helper - intentionally unexported from public API (#14575)
+ */
 function resolveResourceType(action, req) {
   const mapping = ACTION_RESOURCE_MAP[action];
   if (mapping) return mapping.resourceType;
@@ -136,6 +139,9 @@ function resolveResourceType(action, req) {
 
 /**
  * Resolves the target resource identifier from request params or body.
+ */
+/**
+ * @internal Internal helper - intentionally unexported from public API (#14575)
  */
 function resolveResourceId(req) {
   return (
@@ -344,4 +350,24 @@ export function auditWithState(action, resourceType, getIdFn) {
       return data || null;
     },
   });
+}
+
+/**
+ * Redacts PII fields from an object recursively.
+ */
+export function maskPii(obj) {
+  if (obj === null || obj === undefined || typeof obj !== 'object') return obj;
+  if (Array.isArray(obj)) return obj.map(maskPii);
+  const out = {};
+  for (const [k, v] of Object.entries(obj)) {
+    const norm = k.toLowerCase().replace(/[^a-z]/g, '');
+    if (['password', 'token', 'ssn', 'secret', 'authorization', 'apikey', 'privatekey', 'creditcard', 'cardnumber', 'cvv'].includes(norm)) {
+      out[k] = '***';
+    } else if (typeof v === 'object' && v !== null) {
+      out[k] = maskPii(v);
+    } else {
+      out[k] = v;
+    }
+  }
+  return out;
 }

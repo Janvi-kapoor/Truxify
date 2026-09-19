@@ -59,6 +59,89 @@ void main() {
       () => apiClient.post(
         '/api/orders',
         body: any(named: 'body'),
+        idempotencyKey: any(named: 'idempotencyKey'),
+      ),
+    ).called(1);
+  });
+
+test('createOrder forwards a caller-supplied idempotency key', () async {
+    when(() => apiClient.post(
+      '/api/orders',
+      body: any(named: 'body'),
+      idempotencyKey: 'checkout-attempt-1',
+    )).thenAnswer((_) async => {
+      'order': {'order_display_id': 'ORD-123'},
+    });
+
+    await orderService.createOrder(
+      pickupAddress: 'Pickup Loc',
+      dropAddress: 'Drop Loc',
+      pickupLat: 12.3,
+      pickupLng: 45.6,
+      dropLat: 78.9,
+      dropLng: 12.3,
+      pickupTime: '10:00 AM',
+      goodsType: 'Timber',
+      weightTonnes: 5.5,
+      idempotencyKey: 'checkout-attempt-1',
+    );
+
+    verify(() => apiClient.post(
+      '/api/orders',
+      body: any(named: 'body'),
+      idempotencyKey: 'checkout-attempt-1',
+    )).called(1);
+  });
+
+  test('createOrder and changeDrop trim leading/trailing whitespace from string fields', () async {
+    when(() => apiClient.post(any(), body: any(named: 'body')))
+        .thenAnswer((_) async => {'order': {'order_display_id': 'ORD-TRIM'}});
+    when(() => apiClient.put(any(), body: any(named: 'body')))
+        .thenAnswer((_) async => {'success': true});
+
+    await orderService.createOrder(
+      pickupAddress: '   Warehouse 4A, Mumbai   ',
+      dropAddress: '   Factory 2B, Pune   ',
+      pickupLat: 19.07,
+      pickupLng: 72.87,
+      dropLat: 18.52,
+      dropLng: 73.85,
+      pickupTime: '   Tomorrow, 8:00 AM   ',
+      goodsType: '   Textile Goods   ',
+      weightTonnes: 10.0,
+      paymentMethodId: '   pm_123   ',
+      upiId: '   user@upi   ',
+      driverId: '   drv_789   ',
+      truckId: '   trk_456   ',
+    );
+
+    final capturedBody = verify(
+      () => apiClient.post(
+        '/api/orders',
+        body: captureAny(named: 'body'),
+      ),
+    ).captured.single as Map<String, dynamic>;
+
+    expect(capturedBody['pickup_address'], equals('Warehouse 4A, Mumbai'));
+    expect(capturedBody['drop_address'], equals('Factory 2B, Pune'));
+    expect(capturedBody['pickup_time'], equals('Tomorrow, 8:00 AM'));
+    expect(capturedBody['goods_type'], equals('Textile Goods'));
+    expect(capturedBody['payment_method_id'], equals('pm_123'));
+    expect(capturedBody['upi_id'], equals('user@upi'));
+    expect(capturedBody['driver_id'], equals('drv_789'));
+    expect(capturedBody['truck_id'], equals('trk_456'));
+
+    await orderService.changeDrop(
+      orderDisplayId: '   ORD-TRIM   ',
+      dropAddress: '   New Drop Point, Nashik   ',
+      dropLat: 19.99,
+      dropLng: 73.78,
+    );
+
+    verify(
+      () => apiClient.put(
+        '/api/orders/ORD-TRIM/change-drop',
+        body: {'drop_address': 'New Drop Point, Nashik', 'drop_lat': 19.99, 'drop_lng': 73.78},
       ),
     ).called(1);
   });

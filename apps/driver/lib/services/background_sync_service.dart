@@ -1,4 +1,4 @@
-import 'dart:async';
+﻿import 'dart:async';
 import 'dart:io';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/foundation.dart';
@@ -138,7 +138,38 @@ class BackgroundSyncService {
             }
           }
 
-          final response = await request.send();
+          var response = await request.send();
+         if (response.statusCode == 401) {
+           debugPrint('[BackgroundSyncService] Received 401, refreshing token...');
+           try {
+             final firebaseUser = FirebaseAuth.instance.currentUser;
+             if (firebaseUser != null) {
+               token = await firebaseUser.getIdToken(true);
+             } else {
+               final sessionRes = await Supabase.instance.client.auth.refreshSession();
+               token = sessionRes.session?.accessToken;
+             }
+           } catch (e) {
+             debugPrint('[BackgroundSyncService] Refresh error: $e');
+           }
+           if (token != null && token.isNotEmpty) {
+             final retryReq = http.MultipartRequest('POST', uri);
+             retryReq.headers['Authorization'] = 'Bearer $token';
+             if (pod.signaturePath != null) {
+               final file = File(pod.signaturePath!);
+               if (await file.exists()) {
+                 retryReq.files.add(await http.MultipartFile.fromPath('signature', file.path, contentType: MediaType('image', 'png')));
+               }
+             }
+             if (pod.photoPath != null) {
+               final file = File(pod.photoPath!);
+               if (await file.exists()) {
+                 retryReq.files.add(await http.MultipartFile.fromPath('photo', file.path, contentType: MediaType('image', 'jpeg')));
+               }
+             }
+             response = await retryReq.send();
+           }
+         }
           if (response.statusCode >= 200 && response.statusCode < 300) {
             await podStorageService.markAsSynced(pod.id!);
           }

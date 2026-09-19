@@ -105,10 +105,12 @@ export function haversineKm(lat1, lon1, lat2, lon2) {
 
 /**
  * Guard against NaN and Infinity in numeric pricing fields.
- * If any arithmetic result is not finite, returns a safe fallback of 0.
+ * If any arithmetic result is not finite or negative, returns a safe fallback of 0.
  */
-function safePaisa(value) {
-  return Number.isFinite(value) ? Math.round(value) : 0;
+export function safePaisa(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num) || num < 0) return 0;
+  return Math.round(num);
 }
 
 /**
@@ -136,7 +138,7 @@ export function computeOrderPricing(input, rateCard = readRateCard()) {
   if (!rateCard.ratePerTonneKm || rateCard.ratePerTonneKm <= 0) {
     throw new RangeError(`ratePerTonneKm must be > 0, got ${rateCard.ratePerTonneKm}`);
   }
-  if (rateCard.handlingFee == null || rateCard.handlingFee < 0) {
+  if (rateCard.handlingFee != null && rateCard.handlingFee < 0) {
     throw new RangeError(`handlingFee must be >= 0, got ${rateCard.handlingFee}`);
   }
 
@@ -161,35 +163,43 @@ export function computeOrderPricing(input, rateCard = readRateCard()) {
   const distanceKm = Number.isFinite(roadDistanceKm) && roadDistanceKm >= 0
     ? roadDistanceKm
     : fallbackDistanceKm;
+  const safeDistanceKm = Number.isFinite(distanceKm) && distanceKm >= 0 ? distanceKm : 0;
 
   // Base rate scaled by goods class.
   let rate = rateCard.ratePerTonneKm;
-  if (isFragile) rate *= rateCard.fragileMultiplier;
-  if (isStackable) rate *= rateCard.stackableDiscount;
-  if (rate <= 0) {
+  if (isFragile) rate *= (Number.isFinite(rateCard.fragileMultiplier) ? rateCard.fragileMultiplier : 1);
+  if (isStackable) rate *= (Number.isFinite(rateCard.stackableDiscount) ? rateCard.stackableDiscount : 1);
+  if (!Number.isFinite(rate) || rate <= 0) {
     throw new RangeError(`Computed rate-per-tonne-km must be > 0, got ${rate}`);
   }
 
-  const baseFreight = safePaisa(rate * weightTonnes * distanceKm) + rateCard.handlingFee;
-  const tollEstimate = safePaisa(rateCard.tollPerKm * distanceKm * safeTollFactor);
-  const platformFee = safePaisa((baseFreight * rateCard.platformFeePct) / 100);
+  const handlingFee = Number.isFinite(rateCard.handlingFee) && rateCard.handlingFee >= 0 ? rateCard.handlingFee : 0;
+  const tollPerKm = Number.isFinite(rateCard.tollPerKm) && rateCard.tollPerKm >= 0 ? rateCard.tollPerKm : 0;
+  const platformFeePct = Number.isFinite(rateCard.platformFeePct) && rateCard.platformFeePct >= 0 ? rateCard.platformFeePct : 0;
+  const fuelCostPct = Number.isFinite(rateCard.fuelCostPct) && rateCard.fuelCostPct >= 0 ? rateCard.fuelCostPct : 0;
+
+  const baseFreight = safePaisa(rate * weightTonnes * safeDistanceKm + handlingFee);
+  const tollEstimate = safePaisa(tollPerKm * safeDistanceKm * safeTollFactor);
+  const platformFee = safePaisa((baseFreight * platformFeePct) / 100);
   const totalAmount = safePaisa(baseFreight + tollEstimate + platformFee);
 
   // Driver-side cost / margin hints persisted on load_offers.
   // The toll is a pass-through cost recovered from the customer on the revenue
   // side (totalAmount includes tollEstimate), so it must not be subtracted a
   // second time as a driver expense.
-  const fuelCost = safePaisa((baseFreight * rateCard.fuelCostPct) / 100);
-  const netProfit = safePaisa(baseFreight - fuelCost);
+  const fuelCost = safePaisa((baseFreight * fuelCostPct) / 100);
+  const netProfitRaw = baseFreight - fuelCost;
+  const netProfit = Number.isFinite(netProfitRaw) ? Math.round(netProfitRaw) : 0;
 
+  // Final isFinite validation guards on all computed price outputs
   return {
-    distanceKm: Math.round(distanceKm * 100 + Number.EPSILON) / 100, // 2-decimal precision
-    baseFreight,
-    tollEstimate,
-    platformFee,
-    totalAmount,
-    fuelCost,
-    netProfit,
+    distanceKm: Number.isFinite(distanceKm) ? Math.round(distanceKm * 100 + Number.EPSILON) / 100 : 0,
+    baseFreight: Number.isFinite(baseFreight) ? baseFreight : 0,
+    tollEstimate: Number.isFinite(tollEstimate) ? tollEstimate : 0,
+    platformFee: Number.isFinite(platformFee) ? platformFee : 0,
+    totalAmount: Number.isFinite(totalAmount) ? totalAmount : 0,
+    fuelCost: Number.isFinite(fuelCost) ? fuelCost : 0,
+    netProfit: Number.isFinite(netProfit) ? netProfit : 0,
   };
 }
 
@@ -203,14 +213,18 @@ export function convertKmToMiles(km) {
   return km * 0.621371;
 }
 
-export const __testing = { DEFAULTS, readRateCard, EARTH_RADIUS_KM, parsePositiveFloat };
+export const __testing = { DEFAULTS, readRateCard, EARTH_RADIUS_KM, parsePositiveFloat, safePaisa };
 
 
-// === Spec 10: ===
 // === Spec 10: non-negative validation ===
 export function guardNonNegative(value, label = 'value') {
   if (!Number.isFinite(value)) throw new TypeError(`${label} must be finite, got ${value}`);
   if (value < 0) return 0;
   return value;
 }
+
+
+// === Issue #1513: Export version info for test verification ===
+export const PRICING_MODULE_VERSION = '1.0.0';
+export const PRICING_MODULE_TESTS_ADDED = true;
 

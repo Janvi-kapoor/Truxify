@@ -1,12 +1,19 @@
-import 'package:flutter/material.dart';
-
+﻿import 'package:flutter/material.dart';
+import 'package:lottie/lottie.dart';
 import '../theme/app_theme.dart';
 
+/// Redesigned animated Truxify logo for driver onboarding and splash screens (#311).
 class TruxifyLogo extends StatelessWidget {
-  const TruxifyLogo({super.key, this.size = 28, this.textColor});
+  const TruxifyLogo({
+    super.key,
+    this.size = 28,
+    this.textColor,
+    this.animate = true,
+  });
 
   final double size;
   final Color? textColor;
+  final bool animate;
 
   @override
   Widget build(BuildContext context) {
@@ -26,17 +33,32 @@ class TruxifyLogo extends StatelessWidget {
             borderRadius: BorderRadius.circular(size * 0.28),
             boxShadow: [
               BoxShadow(
-                  color: TruxifyColors.accent.withValues(alpha: 0.06),
-                  blurRadius: 8,
-                  offset: const Offset(0, 2))
+                color: TruxifyColors.accent.withValues(alpha: 0.06),
+                blurRadius: 8,
+                offset: const Offset(0, 2),
+              )
             ],
           ),
           child: Center(
-            child: Icon(
-              Icons.local_shipping_rounded,
-              size: size * 0.62,
-              color: TruxifyColors.white,
-            ),
+            child: animate
+                ? Lottie.asset(
+                    'assets/animations/truxify_logo_anim.json',
+                    width: size * 0.62,
+                    height: size * 0.62,
+                    fit: BoxFit.contain,
+                    errorBuilder: (context, error, stackTrace) {
+                      return Icon(
+                        Icons.local_shipping_rounded,
+                        size: size * 0.62,
+                        color: TruxifyColors.white,
+                      );
+                    },
+                  )
+                : Icon(
+                    Icons.local_shipping_rounded,
+                    size: size * 0.62,
+                    color: TruxifyColors.white,
+                  ),
           ),
         ),
         const SizedBox(width: 10),

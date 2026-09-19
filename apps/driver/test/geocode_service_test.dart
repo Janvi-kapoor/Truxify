@@ -168,4 +168,67 @@ void main() {
       expect(results, isEmpty);
     });
   });
+
+  group('GeocodeService.autocomplete', () {
+    test('filters malformed items and keeps valid suggestions', () async {
+      final client = MockClient((request) async {
+        expect(request.url.path, '/search');
+        expect(request.url.queryParameters['q'], 'Mumbai');
+        return http.Response(
+          jsonEncode([
+            {'display_name': 'Mumbai, Maharashtra, India'},
+            'not-a-map',
+            {'display_name': 'Mumbai Central'},
+          ]),
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      });
+
+      final results = await GeocodeService.autocomplete('Mumbai', client: client);
+
+      expect(results, hasLength(2));
+      expect(results, ['Mumbai, Maharashtra, India', 'Mumbai Central']);
+    });
+
+    test('returns empty list for empty query', () async {
+      final client = MockClient((request) async {
+        throw StateError('Should not be called for empty queries');
+      });
+
+      final results = await GeocodeService.autocomplete('   ', client: client);
+
+      expect(results, isEmpty);
+    });
+
+    test('returns empty list on non-200 response', () async {
+      final client = MockClient((request) async {
+        return http.Response('Error', 500);
+      });
+
+      final results = await GeocodeService.autocomplete('Mumbai', client: client);
+
+      expect(results, isEmpty);
+    });
+
+    test('returns empty list on network error', () async {
+      final client = MockClient((request) async {
+        throw http.ClientException('Simulated network error');
+      });
+
+      final results = await GeocodeService.autocomplete('Mumbai', client: client);
+
+      expect(results, isEmpty);
+    });
+
+    test('returns empty list on malformed response body', () async {
+      final client = MockClient((request) async {
+        return http.Response('not json', 200);
+      });
+
+      final results = await GeocodeService.autocomplete('Mumbai', client: client);
+
+      expect(results, isEmpty);
+    });
+  });
 }

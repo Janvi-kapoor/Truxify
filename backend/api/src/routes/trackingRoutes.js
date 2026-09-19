@@ -1,4 +1,4 @@
-import express from 'express';
+﻿import express from 'express';
 import rateLimit from 'express-rate-limit';
 
 import { authenticate } from '../middleware/auth.js';
@@ -73,13 +73,20 @@ router.post(
         return res.status(400).json({ error: 'Cannot share tracking for completed or cancelled orders' });
       }
 
+      // Revoke any existing active tracking links before creating a new one (#4965)
+      await tokenService.revokeAllForOrder(orderDisplayId);
+
       const tokenData = await tokenService.createToken({
         orderDisplayId,
         createdBy: userId,
       });
 
       // Build the public tracking URL
-      const baseUrl = process.env.PUBLIC_TRACKING_URL || `${req.protocol}://${req.get('host')}`;
+      const baseUrl = process.env.PUBLIC_TRACKING_URL;
+      if (!baseUrl) {
+        logger.error({ orderDisplayId }, 'PUBLIC_TRACKING_URL is not configured');
+        return res.status(503).json({ error: 'Tracking links are temporarily unavailable' });
+      }
       const trackingUrl = `${baseUrl}/track/${tokenData.token}`;
 
       logger.info({ orderDisplayId, userId, tokenId: tokenData.id }, 'Tracking share link generated');

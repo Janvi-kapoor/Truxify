@@ -17,7 +17,9 @@ import {
   optimizeWaypoints,
   optimizeLtlRoute,
   getHaversineDistance,
+  getDriverRoute,
 } from '../../src/services/routingService.js';
+import { DomainError } from '../../src/services/order/domainError.js';
 
 const mockAxiosGet = vi.mocked(axios.get);
 
@@ -32,6 +34,13 @@ describe('routingService - getHaversineDistance', () => {
     const result = getHaversineDistance(12.9716, 77.5946, 13.0827, 80.2707);
     expect(result).toBeGreaterThan(280);
     expect(result).toBeLessThan(310);
+  });
+
+  it('returns approximately 20000 km for antipodal points', () => {
+    // North Pole to South Pole (~20015 km)
+    const result = getHaversineDistance(90, 0, -90, 0);
+    expect(result).toBeGreaterThan(19900);
+    expect(result).toBeLessThan(20100);
   });
 
   it('handles negative coordinates', () => {
@@ -226,6 +235,15 @@ describe('routingService - optimizeLtlRoute', () => {
     expect(result[0].id).toBe('near');
   });
 
+  it('appends tasks with no reachable dropoff (no prior pickup) at the end', () => {
+    const tasks = [
+      { id: 'd_orphan', orderId: 'orphan', type: 'dropoff', lat: 5, lng: 5 },
+      { id: 'p1', orderId: 'o1', type: 'pickup', lat: 1, lng: 1 },
+    ];
+    const result = optimizeLtlRoute(0, 0, tasks);
+    expect(result[result.length - 1].id).toBe('d_orphan');
+  });
+
   it('appends unvisited tasks as failsafe', () => {
     // Create a situation where no nearest task is found
     const tasks = [
@@ -236,5 +254,73 @@ describe('routingService - optimizeLtlRoute', () => {
     const result = optimizeLtlRoute(0, 0, tasks);
     expect(result.length).toBe(2);
     expect(result.every(t => tasks.includes(t))).toBe(true);
+  });
+});
+
+
+describe('routingService - non-finite getHaversineDistance guard', () => {
+  it('should throw TypeError when non-finite coordinates are passed to getHaversineDistance', () => {
+    expect(() => getHaversineDistance(NaN, 77.2090, 27.1767, 78.0081)).toThrow(TypeError);
+    expect(() => getHaversineDistance(28.6139, Infinity, 27.1767, 78.0081)).toThrow(TypeError);
+    expect(() => getHaversineDistance(28.6139, 77.2090, undefined, 78.0081)).toThrow(TypeError);
+  });
+});
+
+describe('routingService - getDriverRoute', () => {
+  it('returns null early for null, undefined, empty, or non-string driverId', async () => {
+    expect(await getDriverRoute(null)).toBeNull();
+    expect(await getDriverRoute(undefined)).toBeNull();
+    expect(await getDriverRoute('')).toBeNull();
+    expect(await getDriverRoute('   ')).toBeNull();
+    expect(await getDriverRoute(12345)).toBeNull();
+  });
+
+  it('throws DomainError when throwOnError option is set and driverId is null/invalid', async () => {
+    await expect(getDriverRoute(null, { throwOnError: true })).rejects.toThrow(DomainError);
+    await expect(getDriverRoute(undefined, { throwOnError: true })).rejects.toThrow(/driverId is required/);
+    await expect(getDriverRoute('', { throwOnError: true })).rejects.toThrow(DomainError);
+  });
+
+  it('fetches driver active route using provided supabase client', async () => {
+    const mockOrder = {
+      id: 'order-123',
+      order_display_id: 'TRX-100',
+      status: 'in_transit',
+      pickup_address: 'Delhi',
+      drop_address: 'Jaipur',
+      pickup_lat: 28.61,
+      pickup_lng: 77.20,
+      drop_lat: 26.91,
+      drop_lng: 75.78,
+    };
+
+    const mockChain = {
+      from: vi.fn().mockReturnThis(),
+      select: vi.fn().mockReturnThis(),
+      eq: vi.fn().mockReturnThis(),
+      in: vi.fn().mockReturnThis(),
+      order: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockReturnThis(),
+      maybeSingle: vi.fn().mockResolvedValue({ data: mockOrder, error: null }),
+    };
+
+    const result = await getDriverRoute('driver-456', { supabaseClient: mockChain });
+    expect(result).toEqual(mockOrder);
+    expect(mockChain.eq).toHaveBeenCalledWith('driver_id', 'driver-456');
+  });
+
+  it('handles database error gracefully when throwOnError is false', async () => {
+    const mockChain = {
+      from: vi.fn().mockReturnThis(),
+      select: vi.fn().mockReturnThis(),
+      eq: vi.fn().mockReturnThis(),
+      in: vi.fn().mockReturnThis(),
+      order: vi.fn().mockReturnThis(),
+      limit: vi.fn().mockReturnThis(),
+      maybeSingle: vi.fn().mockResolvedValue({ data: null, error: { message: 'DB connection error' } }),
+    };
+
+    const result = await getDriverRoute('driver-456', { supabaseClient: mockChain });
+    expect(result).toBeNull();
   });
 });

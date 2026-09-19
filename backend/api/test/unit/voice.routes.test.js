@@ -1,42 +1,121 @@
-import { describe, it, expect } from 'vitest';
+﻿/**
+ * Comprehensive Unit Tests for backend/api/src/routes/voice.routes.js
+ */
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import request from 'supertest';
+import express from 'express';
 
-describe('voiceRoutes structure', () => {
-  const router = {
-    post: (path, ...handlers) => ({ path, handlers: handlers.length }),
-    get: (path, ...handlers) => ({ path, handlers: handlers.length }),
-  };
+// Mock authentication middleware to pass a valid test user
+vi.mock('../../src/middleware/auth.js', () => ({
+  authenticate: (req, _res, next) => {
+    req.user = { id: 'driver-123', role: 'driver' };
+    next();
+  },
+  requireRole: () => (_req, _res, next) => next(),
+}));
 
-  it('handles POST /dispatch with voice AI request', () => {
-    const route = { path: '/dispatch', method: 'post' };
-    expect(route.path).toBe('/dispatch');
-    expect(route.method).toBe('post');
+// Mock voiceAiService
+const mockProcessVoiceQuery = vi.fn();
+vi.mock('../../src/services/voiceAiService.js', () => ({
+  default: {
+    processVoiceQuery: (...args) => mockProcessVoiceQuery(...args),
+  },
+}));
+
+// Mock logger to keep test output clean
+vi.mock('../../src/middleware/logger.js', () => ({
+  default: {
+    info: vi.fn(),
+    error: vi.fn(),
+    warn: vi.fn(),
+    debug: vi.fn(),
+  },
+}));
+
+import voiceRouter from '../../src/routes/voice.routes.js';
+
+function makeApp() {
+  const app = express();
+  app.use(express.json());
+  app.use('/voice', voiceRouter);
+  return app;
+}
+
+describe('POST /voice/assistant', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
   });
 
-  it('handles POST /analyze with payload analysis request', () => {
-    const route = { path: '/analyze', method: 'post' };
-    expect(route.path).toBe('/analyze');
+  it('returns 400 when no audio file is attached in the request', async () => {
+    const res = await request(makeApp())
+      .post('/voice/assistant')
+      .field('language', 'en');
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBeDefined();
+    expect(mockProcessVoiceQuery).not.toHaveBeenCalled();
   });
 
-  it('handles GET /status/:orderId for voice dispatch status', () => {
-    const route = { path: '/status/:orderId', method: 'get' };
-    expect(route.path).toContain(':orderId');
+  it('successfully processes valid audio file, defaults language to "en", and streams audio/mpeg response', async () => {
+    async function* mockStreamGenerator() {
+      yield Buffer.from('chunk1');
+      yield Buffer.from('chunk2');
+    }
+    mockProcessVoiceQuery.mockResolvedValue({
+      stream: mockStreamGenerator(),
+      contentType: 'audio/mpeg',
+    });
+
+    const res = await request(makeApp())
+      .post('/voice/assistant')
+      .attach('audio', Buffer.from('fake-audio-bytes'), {
+        filename: 'query.wav',
+        contentType: 'audio/wav',
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toContain('audio/mpeg');
+    expect(res.headers['transfer-encoding']).toBe('chunked');
+    expect(mockProcessVoiceQuery).toHaveBeenCalledTimes(1);
+    
+    const [filePath, language] = mockProcessVoiceQuery.mock.calls[0];
+    expect(filePath).toBeDefined();
+    expect(language).toBe('en');
   });
 
-  it('handles GET /transcription/:orderId for transcription retrieval', () => {
-    const route = { path: '/transcription/:orderId', method: 'get' };
-    expect(route.path).toContain(':orderId');
+  it('respects explicitly provided language parameter', async () => {
+    async function* mockStreamGenerator() {
+      yield Buffer.from('audio-data');
+    }
+    mockProcessVoiceQuery.mockResolvedValue({
+      stream: mockStreamGenerator(),
+      contentType: 'audio/mpeg',
+    });
+
+    const res = await request(makeApp())
+      .post('/voice/assistant')
+      .field('language', 'hi')
+      .attach('audio', Buffer.from('fake-audio-bytes'), {
+        filename: 'query.wav',
+        contentType: 'audio/wav',
+      });
+
+    expect(res.status).toBe(200);
+    const [, language] = mockProcessVoiceQuery.mock.calls[0];
+    expect(language).toBe('hi');
   });
 
-  it('requires authorization header for voice routes', () => {
-    const validHeaders = { authorization: 'Bearer token123' };
-    expect(validHeaders.authorization).toMatch(/^Bearer /);
-  });
+  it('returns 500 status response and handles errors when voiceAiService throws an exception', async () => {
+    mockProcessVoiceQuery.mockRejectedValue(new Error('AI Service failure'));
 
-  it('rejects voice AI requests without required body fields', () => {
-    const invalidReq = { missing: 'fields' };
-    const validReq = { orderId: 'order-123', voiceQuery: 'dispatch this' };
-    expect(validReq.orderId).toBeTruthy();
-    expect(validReq.voiceQuery).toBeTruthy();
-    expect(invalidReq.orderId).toBeUndefined();
+    const res = await request(makeApp())
+      .post('/voice/assistant')
+      .field('language', 'en')
+      .attach('audio', Buffer.from('fake-audio-bytes'), {
+        filename: 'query.wav',
+        contentType: 'audio/wav',
+      });
+
+    expect(res.status).toBe(500);
   });
 });

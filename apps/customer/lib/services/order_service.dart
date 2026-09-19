@@ -61,29 +61,31 @@ class OrderService {
     double? targetTemperatureMax,
     String? driverId,
     String? truckId,
+    String? idempotencyKey,
   }) async {
     try {
       final body = await _apiClient.post(
         '/api/orders',
         body: <String, dynamic>{
-          'pickup_address': pickupAddress,
+          'pickup_address': pickupAddress.trim(),
           'pickup_lat': pickupLat,
           'pickup_lng': pickupLng,
-          'drop_address': dropAddress,
+          'drop_address': dropAddress.trim(),
           'drop_lat': dropLat,
           'drop_lng': dropLng,
           'pickup_date': (pickupDate ?? DateTime.now()).toIso8601String(),
-          'pickup_time': pickupTime,
-          'goods_type': goodsType,
+          'pickup_time': pickupTime.trim(),
+          'goods_type': goodsType.trim(),
           'weight_tonnes': weightTonnes,
-          'payment_method_id': paymentMethodId,
-          'upi_id': upiId,
+          if (paymentMethodId != null && paymentMethodId.trim().isNotEmpty) 'payment_method_id': paymentMethodId.trim(),
+          if (upiId != null && upiId.trim().isNotEmpty) 'upi_id': upiId.trim(),
           if (requiresRefrigeration) 'requires_refrigeration': true,
           if (targetTemperatureMin != null) 'target_temperature_min': targetTemperatureMin,
           if (targetTemperatureMax != null) 'target_temperature_max': targetTemperatureMax,
-          if (driverId != null && driverId.isNotEmpty) 'driver_id': driverId,
-          if (truckId != null && truckId.isNotEmpty) 'truck_id': truckId,
+          if (driverId != null && driverId.trim().isNotEmpty) 'driver_id': driverId.trim(),
+          if (truckId != null && truckId.trim().isNotEmpty) 'truck_id': truckId.trim(),
         },
+        idempotencyKey: idempotencyKey,
       ) as Map<String, dynamic>?;
 
       return body?['order']?['order_display_id']?.toString() ?? '';
@@ -102,9 +104,9 @@ class OrderService {
   }) async {
     try {
       final body = await _apiClient.put(
-        '/api/orders/${_encodePathSegment(orderDisplayId)}/change-drop',
+        '/api/orders/${_encodePathSegment(orderDisplayId.trim())}/change-drop',
         body: <String, dynamic>{
-          'drop_address': dropAddress,
+          'drop_address': dropAddress.trim(),
           'drop_lat': dropLat,
           'drop_lng': dropLng,
         },
@@ -123,9 +125,9 @@ class OrderService {
   }) async {
     try {
       final body = await _apiClient.post(
-        '/api/orders/${_encodePathSegment(orderDisplayId)}/cancel',
+        '/api/orders/${_encodePathSegment(orderDisplayId.trim())}/cancel',
         body: <String, dynamic>{
-          if (reason != null) 'reason': reason,
+          if (reason != null && reason.trim().isNotEmpty) 'reason': reason.trim(),
         },
       );
       return body is Map<String, dynamic> ? body : <String, dynamic>{};

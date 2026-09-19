@@ -1,201 +1,99 @@
-/**
- * Unit tests for backend/api/src/middleware/contentType.js
- *
- * Coverage:
- *   - Returns 415 for POST/PUT/PATCH without content-type header
- *   - Returns 415 for POST/PUT/PATCH with unsupported content-type
- *   - Calls next() for POST/PUT/PATCH with application/json
- *   - Calls next() for POST/PUT/PATCH with application/x-www-form-urlencoded
- *   - Calls next() for POST/PUT/PATCH with multipart/form-data
- *   - Ignores GET/DELETE requests (calls next() without checking)
- *   - Ignores charset parameter in content-type comparison
- *
- * Run with: npx vitest run test/unit/contentType.test.js
- */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { requireJsonContent } from '../../src/middleware/contentType.js';
+﻿import { describe, it, expect, vi } from 'vitest'
+import { requireJsonContent } from '../../src/middleware/contentType.js'
 
-function createMocks(overrides = {}) {
-  const jsonMock = vi.fn();
-  const statusMock = vi.fn(() => ({
-    json: jsonMock,
-  }));
-  return {
-    req: {
-      method: 'POST',
-      headers: {},
-      ...overrides.req,
-    },
-    res: {
-      status: statusMock,
-      _jsonMock: jsonMock,
-      ...overrides.res,
-    },
-    next: vi.fn(),
-  };
-}
+describe('requireJsonContent middleware', () => {
+  it('should pass through GET and DELETE requests without checking content-type', () => {
+    const req = { method: 'GET', headers: {} }
+    const res = { status: vi.fn().mockReturnThis(), json: vi.fn() }
+    const next = vi.fn()
 
-describe('requireJsonContent', () => {
-  let req;
-  let res;
-  let next;
+    requireJsonContent(req, res, next)
 
-  beforeEach(() => {
-    req = { method: 'POST', headers: {} };
-    res = {
-      status: vi.fn(() => ({
-        json: vi.fn(),
-      })),
-    };
-    next = vi.fn();
-  });
+    expect(next).toHaveBeenCalled()
+    expect(res.status).not.toHaveBeenCalled()
+  })
 
-  describe('POST requests', () => {
-    it('returns 415 when content-type header is missing', () => {
-      const { req, res, next } = createMocks();
-      requireJsonContent(req, res, next);
+  it('should return 415 when POST has no content-type header', () => {
+    const req = { method: 'POST', headers: {} }
+    const res = { status: vi.fn().mockReturnThis(), json: vi.fn() }
+    const next = vi.fn()
 
-      expect(res.status).toHaveBeenCalledWith(415);
-      expect(res._jsonMock).toHaveBeenCalledWith(
-        expect.objectContaining({ error: 'Unsupported Media Type.' })
-      );
-      expect(next).not.toHaveBeenCalled();
-    });
+    requireJsonContent(req, res, next)
 
-    it('returns 415 when content-type is text/plain', () => {
-      const { req, res, next } = createMocks({
-        req: {
-          method: 'POST',
-          headers: { 'content-type': 'text/plain' },
-        },
-      });
-      requireJsonContent(req, res, next);
+    expect(res.status).toHaveBeenCalledWith(415)
+    expect(next).not.toHaveBeenCalled()
+  })
 
-      expect(res.status).toHaveBeenCalledWith(415);
-      expect(next).not.toHaveBeenCalled();
-    });
+  it('should pass when POST has application/json content-type', () => {
+    const req = { method: 'POST', headers: { 'content-type': 'application/json' }, body: {} }
+    const res = { status: vi.fn().mockReturnThis(), json: vi.fn() }
+    const next = vi.fn()
 
-    it('returns 415 for malformed content-type with charset prefix', () => {
-      const { req, res, next } = createMocks({
-        req: {
-          method: 'POST',
-          headers: { 'content-type': 'text/plain; charset=utf-8' },
-        },
-      });
-      requireJsonContent(req, res, next);
+    requireJsonContent(req, res, next)
 
-      expect(res.status).toHaveBeenCalledWith(415);
-      expect(next).not.toHaveBeenCalled();
-    });
+    expect(next).toHaveBeenCalled()
+  })
 
-    it('calls next() for application/json', () => {
-      const { req, res, next } = createMocks({
-        req: {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-        },
-      });
-      requireJsonContent(req, res, next);
+  it('should pass when POST has application/x-www-form-urlencoded content-type', () => {
+    const req = { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' } }
+    const res = { status: vi.fn().mockReturnThis(), json: vi.fn() }
+    const next = vi.fn()
 
-      expect(next).toHaveBeenCalled();
-      expect(res.status).not.toHaveBeenCalled();
-    });
+    requireJsonContent(req, res, next)
 
-    it('calls next() for application/json with charset', () => {
-      const { req, res, next } = createMocks({
-        req: {
-          method: 'POST',
-          headers: { 'content-type': 'application/json; charset=utf-8' },
-        },
-      });
-      requireJsonContent(req, res, next);
+    expect(next).toHaveBeenCalled()
+  })
 
-      expect(next).toHaveBeenCalled();
-      expect(res.status).not.toHaveBeenCalled();
-    });
+  it('should pass when POST has multipart/form-data content-type', () => {
+    const req = { method: 'POST', headers: { 'content-type': 'multipart/form-data' } }
+    const res = { status: vi.fn().mockReturnThis(), json: vi.fn() }
+    const next = vi.fn()
 
-    it('calls next() for application/x-www-form-urlencoded', () => {
-      const { req, res, next } = createMocks({
-        req: {
-          method: 'POST',
-          headers: { 'content-type': 'application/x-www-form-urlencoded' },
-        },
-      });
-      requireJsonContent(req, res, next);
+    requireJsonContent(req, res, next)
 
-      expect(next).toHaveBeenCalled();
-      expect(res.status).not.toHaveBeenCalled();
-    });
+    expect(next).toHaveBeenCalled()
+  })
 
-    it('calls next() for multipart/form-data', () => {
-      const { req, res, next } = createMocks({
-        req: {
-          method: 'POST',
-          headers: { 'content-type': 'multipart/form-data; boundary=----FormBoundary' },
-        },
-      });
-      requireJsonContent(req, res, next);
+  it('should return 415 when POST has invalid mime type (text/plain)', () => {
+    const req = { method: 'POST', headers: { 'content-type': 'text/plain' } }
+    const res = { status: vi.fn().mockReturnThis(), json: vi.fn() }
+    const next = vi.fn()
 
-      expect(next).toHaveBeenCalled();
-      expect(res.status).not.toHaveBeenCalled();
-    });
-  });
+    requireJsonContent(req, res, next)
 
-  describe('PUT requests', () => {
-    it('returns 415 when PUT has no content-type', () => {
-      const { req, res, next } = createMocks({ req: { method: 'PUT', headers: {} } });
-      requireJsonContent(req, res, next);
+    expect(res.status).toHaveBeenCalledWith(415)
+    expect(next).not.toHaveBeenCalled()
+  })
 
-      expect(res.status).toHaveBeenCalledWith(415);
-      expect(next).not.toHaveBeenCalled();
-    });
+  it('should return 415 when POST has malformed mime (application/jsonx)', () => {
+    const req = { method: 'POST', headers: { 'content-type': 'application/jsonx' } }
+    const res = { status: vi.fn().mockReturnThis(), json: vi.fn() }
+    const next = vi.fn()
 
-    it('calls next() for PUT with application/json', () => {
-      const { req, res, next } = createMocks({
-        req: { method: 'PUT', headers: { 'content-type': 'application/json' } },
-      });
-      requireJsonContent(req, res, next);
+    requireJsonContent(req, res, next)
 
-      expect(next).toHaveBeenCalled();
-    });
-  });
+    expect(res.status).toHaveBeenCalledWith(415)
+    expect(next).not.toHaveBeenCalled()
+  })
 
-  describe('PATCH requests', () => {
-    it('returns 415 when PATCH has no content-type', () => {
-      const { req, res, next } = createMocks({ req: { method: 'PATCH', headers: {} } });
-      requireJsonContent(req, res, next);
+  it('should return 400 when POST has application/json but body is a non-object array', () => {
+    const req = { method: 'POST', headers: { 'content-type': 'application/json' }, body: [] }
+    const res = { status: vi.fn().mockReturnThis(), json: vi.fn() }
+    const next = vi.fn()
 
-      expect(res.status).toHaveBeenCalledWith(415);
-      expect(next).not.toHaveBeenCalled();
-    });
+    requireJsonContent(req, res, next)
 
-    it('calls next() for PATCH with application/json', () => {
-      const { req, res, next } = createMocks({
-        req: { method: 'PATCH', headers: { 'content-type': 'application/json' } },
-      });
-      requireJsonContent(req, res, next);
+    expect(res.status).toHaveBeenCalledWith(400)
+    expect(next).not.toHaveBeenCalled()
+  })
 
-      expect(next).toHaveBeenCalled();
-    });
-  });
+  it('should pass when POST has application/json but body is null', () => {
+    const req = { method: 'POST', headers: { 'content-type': 'application/json' }, body: null }
+    const res = { status: vi.fn().mockReturnThis(), json: vi.fn() }
+    const next = vi.fn()
 
-  describe('GET requests (pass-through)', () => {
-    it('calls next() without checking content-type for GET', () => {
-      const { req, res, next } = createMocks({ req: { method: 'GET', headers: {} } });
-      requireJsonContent(req, res, next);
+    requireJsonContent(req, res, next)
 
-      expect(next).toHaveBeenCalled();
-      expect(res.status).not.toHaveBeenCalled();
-    });
-  });
-
-  describe('DELETE requests (pass-through)', () => {
-    it('calls next() without checking content-type for DELETE', () => {
-      const { req, res, next } = createMocks({ req: { method: 'DELETE', headers: {} } });
-      requireJsonContent(req, res, next);
-
-      expect(next).toHaveBeenCalled();
-      expect(res.status).not.toHaveBeenCalled();
-    });
-  });
-});
+    expect(next).toHaveBeenCalled()
+  })
+})

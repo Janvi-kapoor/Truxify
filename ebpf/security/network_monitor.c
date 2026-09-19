@@ -100,30 +100,35 @@ int trace_tcp_connect(struct trace_event_raw_tcp_connect *args)
 
     struct rate_entry *entry = bpf_map_lookup_elem(&rate_limit, &rk);
     if (entry) {
+        int rate_limited = 0;
+        struct drop_event ev = {};
+
         // Guard the read-modify-write on the shared map value so concurrent
         // connects on different CPUs cannot both pass the threshold check.
         bpf_spin_lock(&entry->lock);
         if (now - entry->last_seen < RATE_LIMIT_WINDOW_NS) {
             if (entry->count >= MAX_CONNS_PER_WINDOW) {
-                // Enforce: alert userspace with the offending daddr:dport so
-                // a firewall rule can be installed for the destination.
-                struct drop_event ev = {
-                    .daddr = rk.daddr,
-                    .dport = rk.dport,
-                    .ts = now,
-                };
-                bpf_ringbuf_output(&rate_events, &ev, sizeof(ev), 0);
-                bpf_printk("Rate limit exceeded for daddr:%u dport:%u\n", rk.daddr, rk.dport);
-                bpf_spin_unlock(&entry->lock);
-                return 0;
+                rate_limited = 1;
+                ev.daddr = rk.daddr;
+                ev.dport = rk.dport;
+                ev.ts = now;
+            } else {
+                entry->count++;
             }
-            entry->count++;
         } else {
             // Window elapsed: reset instead of growing the counter unbounded.
             entry->last_seen = now;
             entry->count = 1;
         }
         bpf_spin_unlock(&entry->lock);
+
+        if (rate_limited) {
+            // Enforce: alert userspace with the offending daddr:dport so
+            // a firewall rule can be installed for the destination.
+            bpf_ringbuf_output(&rate_events, &ev, sizeof(ev), 0);
+            bpf_printk("Rate limit exceeded for daddr:%u dport:%u\n", rk.daddr, rk.dport);
+            return 0;
+        }
     } else {
         struct rate_entry new_entry = {
             .lock = {},

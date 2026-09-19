@@ -43,6 +43,15 @@ export const CONSUMER_GROUPS = {
   ESCROW_SERVICE: 'escrow-service',
 };
 
+/**
+ * Returns a log-safe string representation of a Kafka message key.
+ * Kafka permits null keys, so keyless messages must not be treated as
+ * processing failures merely because debug logging formats the key.
+ */
+export function formatKafkaMessageKey(key) {
+  return key?.toString() ?? null;
+}
+
 class KafkaConfig {
   get kafka() {
     return kafka;
@@ -79,25 +88,28 @@ class KafkaConfig {
   async createTopics() {
     const admin = kafka.admin();
     await admin.connect();
-    
-    const topics = Object.values(TOPICS).map(topic => ({
-      topic,
-      numPartitions: 3,
-      replicationFactor: 1,
-      configEntries: [
-        { name: 'retention.ms', value: '604800000' }, // 7 days
-        { name: 'cleanup.policy', value: 'delete' },
-        { name: 'delete.retention.ms', value: '604800000' },
-      ],
-    }));
-    
-    await admin.createTopics({
-      topics,
-      validateOnly: false,
-    });
-    
-    await admin.disconnect();
-    logger.info('✅ Kafka topics created');
+
+    try {
+      const topics = Object.values(TOPICS).map(topic => ({
+        topic,
+        numPartitions: 3,
+        replicationFactor: 1,
+        configEntries: [
+          { name: 'retention.ms', value: '604800000' }, // 7 days
+          { name: 'cleanup.policy', value: 'delete' },
+          { name: 'delete.retention.ms', value: '604800000' },
+        ],
+      }));
+
+      await admin.createTopics({
+        topics,
+        validateOnly: false,
+      });
+
+      logger.info('✅ Kafka topics created');
+    } finally {
+      await admin.disconnect();
+    }
   }
 
   async getProducer() {
@@ -209,7 +221,7 @@ class KafkaConfig {
           }
           const parentContext = propagation.extract(context.active(), normalizedHeaders);
 
-          logger.debug(`📥 Message received: ${topic}`, { key: message.key.toString() });
+          logger.debug(`📥 Message received: ${topic}`, { key: formatKafkaMessageKey(message.key) });
 
           await context.with(parentContext, async () => {
             await messageHandler(topic, value, message);
@@ -242,10 +254,12 @@ class KafkaConfig {
   async getConsumerGroupOffsets(groupId) {
     const admin = kafka.admin();
     await admin.connect();
-    
-    const offsets = await admin.listConsumerGroupOffsets(groupId);
-    await admin.disconnect();
-    return offsets;
+
+    try {
+      return await admin.listConsumerGroupOffsets(groupId);
+    } finally {
+      await admin.disconnect();
+    }
   }
 
   parsePartitionId(partition) {

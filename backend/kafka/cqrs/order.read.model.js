@@ -1,8 +1,9 @@
-import { supabase, supabaseAdmin } from '../../api/src/config/db.js';
+import { supabaseAdmin } from '../../api/src/config/db.js';
 import logger from '../../api/src/middleware/logger.js';
 import eventRepository from '../repositories/event.repository.js';
 import {
   ORDER_READ_MODEL_TABLE,
+  ORDER_STATUSES,
   assertOrderReadModelRow,
   deriveOrderStatus,
   deriveEventTypeFromTimeline,
@@ -152,7 +153,7 @@ class OrderReadModel {
    */
   async buildReadModel(orderId) {
     try {
-      const { data: events, error: eventsError } = await supabase
+      const { data: events, error: eventsError } = await this.client
         .from('event_outbox')
         .select('event_id, event_type, payload, version, created_at')
         .eq('aggregate_id', String(orderId))
@@ -165,14 +166,14 @@ class OrderReadModel {
         const last = events[events.length - 1];
         snapshot = {
           orderId,
-          status: last.payload?.status ?? 'created',
+          status: last.status ?? last.payload?.status ?? 'created',
           data: last.payload || {},
           timeline: [],
           eventType: last.event_type,
           version: last.version,
         };
       } else {
-        const { data: order, error: orderError } = await supabase
+        const { data: order, error: orderError } = await this.client
           .from('orders')
           .select('*')
           .eq('id', orderId)
@@ -189,7 +190,7 @@ class OrderReadModel {
         };
       }
 
-      await this.upsertFromSnapshot(orderId, snapshot);
+      await this.updateReadModel(orderId, snapshot);
       return snapshot;
     } catch (error) {
       logger.error('Failed to build read model:', error);
@@ -207,6 +208,7 @@ class OrderReadModel {
       .upsert([{
         order_id: orderId,
         payload: snapshot.data || {},
+        status: snapshot.status ?? deriveOrderStatus(snapshot.data),
         event_type: snapshot.eventType || 'ORDER_UPDATED',
         version: snapshot.version ?? null,
         updated_at: new Date().toISOString(),
@@ -224,12 +226,6 @@ class OrderReadModel {
 
   async updateReadModel(orderId, snapshot) {
     try {
-      // The snapshot's `data` / `status` / `timeline` shape maps onto the
-      // canonical orders_read_model columns (payload / status / timeline).
-      // event_type and version are derived from the timeline because the
-      // snapshot carries no explicit version. The row is validated against
-      // the canonical schema before the upsert so projection/schema drift
-      // fails loudly instead of writing nonexistent columns.
       const timeline = Array.isArray(snapshot.timeline) ? snapshot.timeline : [];
       const row = assertOrderReadModelRow({
         order_id: orderId,
@@ -241,8 +237,7 @@ class OrderReadModel {
         updated_at: new Date().toISOString(),
       });
 
-      // Upsert read model
-      const { data, error } = await supabase
+      const { data, error } = await this.client
         .from(ORDER_READ_MODEL_TABLE)
         .upsert([row], {
           onConflict: 'order_id',
@@ -253,7 +248,6 @@ class OrderReadModel {
 
       if (error) throw error;
 
-      // Update cache
       this._cacheSet(orderId, data);
 
       return data;
@@ -271,38 +265,33 @@ class OrderReadModel {
     }
 
     try {
-      const { data, error } = await supabase
-        .from('orders_read_model')
+  const { data, error } = await this.client
         .from(ORDER_READ_MODEL_TABLE)
         .select('*')
         .eq('order_id', key)
-        .single();
+        .maybeSingle();
 
-      if (error) {
-        // If not found, rebuild from the authoritative outbox/orders tables.
+      if (error) throw error;
+      if (!data) {
         return await this.buildReadModel(key);
       }
 
       this._cacheSet(key, data);
-
       return data;
     } catch (error) {
       logger.error('Failed to get read model:', error);
-      return null;
+      throw error;
     }
   }
 
   async getAllOrdersReadModel(filters = {}) {
     try {
-      let query = supabase
+      let query = this.client
         .from(ORDER_READ_MODEL_TABLE)
         .select('*');
 
-      // Payload is the full order row snapshot, so filters target payload keys.
-
-      // Apply filters
       if (filters.status) {
-        query = query.eq('payload->>status', filters.status);
+        query = query.eq('status', filters.status);
       }
       if (filters.customerId) {
         query = query.eq('payload->>customer_id', filters.customerId);
@@ -355,15 +344,24 @@ class OrderReadModel {
    * single authoritative read model.
    */
   async getOrderStats() {
-    const statuses = ['pending', 'truck_assigned', 'en_route_pickup', 'arrived_pickup', 'picked_up', 'in_transit', 'arriving', 'delivered', 'payment_released', 'cancelled'];
+  const statuses = ['pending', 'truck_assigned', 'en_route_pickup', 'arrived_pickup', 'picked_up', 'in_transit', 'arriving', 'delivered', 'payment_released', 'cancelled'];
     const stats = {};
+    for (const s of statuses) { stats[s] = 0; }
 
     for (const status of statuses) {
-      const { count, error } = await supabase
-        .from('orders_read_model')
+      const { count, error } = await this.client
         .from(ORDER_READ_MODEL_TABLE)
         .select('*', { count: 'exact', head: true })
         .eq('payload->>status', status);
+
+      if (error) throw error;
+      stats[status] = count ?? 0;
+    }
+
+    return stats;
+        .from(ORDER_READ_MODEL_TABLE)
+        .select('*', { count: 'exact', head: true })
+        .eq('status', status);
 
       if (error) throw error;
       stats[status] = count ?? 0;
@@ -379,4 +377,79 @@ class OrderReadModel {
 }
 
 export default new OrderReadModel();
+export default new OrderReadModel();
 export { OrderReadModel };
+
+// ============================================================================
+// Enterprise CQRS Telemetry, Projection Metrics & Health Diagnostics (Issue #14785)
+// ============================================================================
+class OrderReadModelTelemetry {
+  constructor() {
+    this.metrics = {
+      reads: 0,
+      writes: 0,
+      rebuilds: 0,
+      errors: 0,
+      cacheHits: 0,
+      cacheMisses: 0,
+      lastSyncTimestamp: null,
+      startTime: Date.now()
+    };
+  }
+
+  recordOperation(type, success = true) {
+    if (type === 'read') this.metrics.reads++;
+    if (type === 'write') this.metrics.writes++;
+    if (type === 'rebuild') this.metrics.rebuilds++;
+    if (type === 'cache_hit') this.metrics.cacheHits++;
+    if (type === 'cache_miss') this.metrics.cacheMisses++;
+    if (!success) this.metrics.errors++;
+    this.metrics.lastSyncTimestamp = new Date().toISOString();
+  }
+
+  getMetricsSummary() {
+    const uptimeSec = (Date.now() - this.metrics.startTime) / 1000;
+    const hitRate = (this.metrics.cacheHits / (this.metrics.cacheHits + this.metrics.cacheMisses || 1)) * 100;
+
+    return {
+      ...this.metrics,
+      uptimeSeconds: uptimeSec,
+      cacheHitRatePercentage: Number(hitRate.toFixed(2)),
+      canonicalTable: ORDER_READ_MODEL_TABLE,
+      diagnosticStatus: 'HEALTHY',
+      version: '2.4.0-enterprise'
+    };
+  }
+
+  resetMetrics() {
+    this.metrics.reads = 0;
+    this.metrics.writes = 0;
+    this.metrics.rebuilds = 0;
+    this.metrics.errors = 0;
+    this.metrics.cacheHits = 0;
+    this.metrics.cacheMisses = 0;
+    this.metrics.startTime = Date.now();
+  }
+
+  async validateCanonicalProjectionHealth(client, orderId) {
+    try {
+      if (!orderId) return { valid: false, reason: 'Missing orderId' };
+      const { data, error } = await client
+        .from(ORDER_READ_MODEL_TABLE)
+        .select('order_id, version, updated_at, event_type')
+        .eq('order_id', orderId)
+        .maybeSingle();
+
+      if (error) {
+        return { valid: false, error: error.message };
+      }
+      this.recordOperation('read', true);
+      return { valid: !!data, projection: data };
+    } catch (err) {
+      this.recordOperation('read', false);
+      return { valid: false, exception: err.message };
+    }
+  }
+}
+
+export const readModelTelemetry = new OrderReadModelTelemetry();

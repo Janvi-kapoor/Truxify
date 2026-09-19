@@ -11,6 +11,7 @@ import { PolicyError, policy } from '../security/policyEngine.js';
 import logger from '../middleware/logger.js';
 
 const router = express.Router();
+const BLOCKCHAIN_TX_HASH_RE = /^0x[0-9a-fA-F]{64}$/;
 const oracleVerificationLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 300,
@@ -95,6 +96,18 @@ router.post('/confirm', oracleVerificationLimiter, authenticate, validateBody(or
 router.post('/verify-crosschain', oracleVerificationLimiter, authenticate, validateBody(oracleVerifyCrosschainSchema), async (req, res) => {
   try {
     const { orderId, blockchainHash } = req.body;
+
+    // Defense in depth: reject malformed transaction hashes before any order
+    // lookup or oracle/RPC work. The request schema enforces the same bytes32
+    // shape, but this guard keeps the route safe if validation is bypassed or
+    // a future schema regression weakens the constraint.
+    if (!BLOCKCHAIN_TX_HASH_RE.test(blockchainHash)) {
+      return res.status(400).json({
+        success: false,
+        error: 'blockchainHash must be a 0x-prefixed 32-byte hex string'
+      });
+    }
+
     await authorizeOrderAccess(req, orderId);
 
     const result = await oracleService.verifyCrossChain(orderId, blockchainHash);

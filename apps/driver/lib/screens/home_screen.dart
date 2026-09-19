@@ -18,7 +18,6 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:http/http.dart' as http;
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart' as ll;
 import 'package:truxify_shared/truxify_shared.dart';
@@ -36,6 +35,7 @@ import '../services/trip_service.dart';
 import '../services/sync_service.dart';
 import '../services/battery_service.dart';
 import '../services/location_service.dart';
+import '../services/secure_storage.dart';
 import '../services/weigh_station_service.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import '../theme/app_theme.dart';
@@ -719,7 +719,6 @@ class _HomeScreenState extends State<HomeScreen> {
                 ? '$truckPlate · $truckModel'
                 : (activeTrip['truck_label'] as String?) ?? 'Truck assigned';
 
-        final prefs = await SharedPreferences.getInstance();
         final distanceStr = (activeTrip['distance'] as String?) ??
             (activeTrip['trip_distance'] as String?) ??
             '';
@@ -731,17 +730,20 @@ class _HomeScreenState extends State<HomeScreen> {
             (activeTrip['payout'] as String?) ??
             '';
 
-        await prefs.setString('cached_trip_id', tripId);
-        await prefs.setString('cached_order_id', activeTrip['order_id']?.toString() ?? '');
-        await prefs.setString('cached_truck_label', truckLabel);
-        await prefs.setString('cached_distance', distanceStr);
-        await prefs.setString('cached_duration', durationStr);
-        await prefs.setString('cached_payout', payoutStr);
+        await Future.wait([
+          SecureStorage.save('cached_trip_id', tripId),
+          SecureStorage.save(
+              'cached_order_id', activeTrip['order_id']?.toString() ?? ''),
+          SecureStorage.save('cached_truck_label', truckLabel),
+          SecureStorage.save('cached_distance', distanceStr),
+          SecureStorage.save('cached_duration', durationStr),
+          SecureStorage.save('cached_payout', payoutStr),
+        ]);
 
         final isTripStarted = stops.any(
           (s) => s['is_completed'] == true || s['is_current'] == true,
         );
-        await prefs.setBool('cached_is_started', isTripStarted);
+        await SecureStorage.save('cached_is_started', isTripStarted.toString());
 
         // Compute stops remaining and current milestone for the home card.
         final pendingStops = stops.where((s) => s['is_completed'] != true).length;
@@ -765,12 +767,16 @@ class _HomeScreenState extends State<HomeScreen> {
         if (stops.isNotEmpty) {
           final lastStop = stops.last;
           final address = lastStop['drop_location'] as String? ?? '';
-          await prefs.setString('cached_address', address);
+          await SecureStorage.save('cached_address', address);
 
           final dropPoint = await GeocodeService.resolvePlace(address);
           if (dropPoint != null) {
-            await prefs.setDouble('cached_drop_lat', dropPoint.latitude);
-            await prefs.setDouble('cached_drop_lng', dropPoint.longitude);
+            await Future.wait([
+              SecureStorage.save(
+                  'cached_drop_lat', dropPoint.latitude.toString()),
+              SecureStorage.save(
+                  'cached_drop_lng', dropPoint.longitude.toString()),
+            ]);
           }
 
           if (dropPoint != null && mounted) {
@@ -787,9 +793,18 @@ class _HomeScreenState extends State<HomeScreen> {
             });
           }
       } else {
-        final prefs = await SharedPreferences.getInstance();
-        await prefs.remove('cached_trip_id');
-        await prefs.remove('cached_order_id');
+        await Future.wait([
+          SecureStorage.delete('cached_trip_id'),
+          SecureStorage.delete('cached_order_id'),
+          SecureStorage.delete('cached_truck_label'),
+          SecureStorage.delete('cached_distance'),
+          SecureStorage.delete('cached_duration'),
+          SecureStorage.delete('cached_payout'),
+          SecureStorage.delete('cached_is_started'),
+          SecureStorage.delete('cached_address'),
+          SecureStorage.delete('cached_drop_lat'),
+          SecureStorage.delete('cached_drop_lng'),
+        ]);
         if (mounted) {
           setState(() {
             _isOffline = false;
@@ -806,23 +821,36 @@ class _HomeScreenState extends State<HomeScreen> {
       }
     } catch (e) {
       debugPrint('Error loading active trip: $e');
-      final prefs = await SharedPreferences.getInstance();
-      if (prefs.getString('cached_trip_id') != null && mounted) {
+      final cachedTripId = await SecureStorage.read('cached_trip_id');
+      if (cachedTripId != null && mounted) {
+        final cachedOrderId = await SecureStorage.read('cached_order_id');
+        final cachedTruckLabel =
+            (await SecureStorage.read('cached_truck_label')) ?? '';
+        final cachedDistance =
+            (await SecureStorage.read('cached_distance')) ?? '';
+        final cachedDuration =
+            (await SecureStorage.read('cached_duration')) ?? '';
+        final cachedPayout = (await SecureStorage.read('cached_payout')) ?? '';
+        final cachedIsStarted =
+            (await SecureStorage.read('cached_is_started')) == 'true';
+
         setState(() {
           _isOffline = true;
-          _activeTripId = prefs.getString('cached_trip_id');
-          _activeOrderId = prefs.getString('cached_order_id');
-          _activeTruckLabel = prefs.getString('cached_truck_label') ?? '';
-          _activeTripDistance = prefs.getString('cached_distance') ?? '';
-          _activeTripDuration = prefs.getString('cached_duration') ?? '';
-          _activeTripPayout = prefs.getString('cached_payout') ?? '';
-          _isTripStarted = prefs.getBool('cached_is_started') ?? false;
-          _activeTripStatus =
-              _isTripStarted ? 'EN-ROUTE' : 'ASSIGNED LOAD';
+          _activeTripId = cachedTripId;
+          _activeOrderId = cachedOrderId;
+          _activeTruckLabel = cachedTruckLabel;
+          _activeTripDistance = cachedDistance;
+          _activeTripDuration = cachedDuration;
+          _activeTripPayout = cachedPayout;
+          _isTripStarted = cachedIsStarted;
+          _activeTripStatus = cachedIsStarted ? 'EN-ROUTE' : 'ASSIGNED LOAD';
         });
-        final address = prefs.getString('cached_address');
-        final lat = prefs.getDouble('cached_drop_lat');
-        final lng = prefs.getDouble('cached_drop_lng');
+
+        final address = await SecureStorage.read('cached_address');
+        final lat =
+            double.tryParse((await SecureStorage.read('cached_drop_lat')) ?? '');
+        final lng =
+            double.tryParse((await SecureStorage.read('cached_drop_lng')) ?? '');
         if (address != null && lat != null && lng != null) {
           setState(() {
             _destination = DestinationPickResult(

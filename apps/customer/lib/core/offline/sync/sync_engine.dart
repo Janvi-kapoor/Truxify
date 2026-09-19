@@ -65,6 +65,8 @@ class SyncEngine {
   final Connectivity _connectivity = Connectivity();
 
   Future<void> startListening() async {
+    if (_connectivitySubscription != null) return;
+
     _connectivitySubscription = _connectivity.onConnectivityChanged.listen((result) {
       final hasNetwork = !result.contains(ConnectivityResult.none);
       if (hasNetwork) {

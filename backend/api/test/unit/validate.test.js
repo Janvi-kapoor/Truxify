@@ -191,3 +191,51 @@ describe('validateArray', () => {
     }));
   });
 });
+
+describe('validateParams - paymentId UUID validation', () => {
+  const paymentParamsSchema = z.object({ paymentId: z.string().uuid() });
+  const VALID_PAYMENT_ID = '123e4567-e89b-12d3-a456-426614174000';
+
+  function makeContext(params) {
+    const req = { params, requestId: 'req-1' };
+    const res = { status: vi.fn().mockReturnThis(), json: vi.fn() };
+    const next = vi.fn();
+    return { req, res, next };
+  }
+
+  it('accepts a well-formed UUID paymentId', () => {
+    const mw = validateParams(paymentParamsSchema);
+    const { req, res, next } = makeContext({ paymentId: VALID_PAYMENT_ID });
+
+    mw(req, res, next);
+
+    expect(next).toHaveBeenCalled();
+    expect(res.status).not.toHaveBeenCalled();
+  });
+
+  it('rejects a malformed paymentId with a 400', () => {
+    const mw = validateParams(paymentParamsSchema);
+    const { req, res, next } = makeContext({ paymentId: 'not-a-uuid' });
+
+    mw(req, res, next);
+
+    expect(next).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
+      error: 'Validation failed',
+      details: expect.arrayContaining([
+        expect.objectContaining({ field: 'paymentId' }),
+      ]),
+    }));
+  });
+
+  it('rejects a missing paymentId with a 400', () => {
+    const mw = validateParams(paymentParamsSchema);
+    const { req, res, next } = makeContext({});
+
+    mw(req, res, next);
+
+    expect(next).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(400);
+  });
+});
