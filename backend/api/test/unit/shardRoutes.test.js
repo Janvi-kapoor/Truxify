@@ -79,6 +79,27 @@ describe('shardRoutes', () => {
       expect(res.body.data.shard).toBe('shard-us-west');
     });
 
+    it('accepts valid coordinate boundaries', async () => {
+      shardManagerMock.getShardForLocation.mockReturnValue('shard-boundary');
+      const res = await request(makeApp())
+        .get('/shards/shards/location')
+        .query({ lat: '90', lng: '180' });
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.data.lat).toBe(90);
+      expect(res.body.data.lng).toBe(180);
+      expect(shardManagerMock.getShardForLocation).toHaveBeenCalledWith(90, 180);
+    });
+
+    it('returns 400 when lat is an array', async () => {
+      const res = await request(makeApp())
+        .get('/shards/shards/location')
+        .query({ lat: ['40.7128', '41'], lng: '-74.0060' });
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+      expect(res.body.error).toContain('lat must be a single value');
+    });
+
     it('returns 400 when lat is missing', async () => {
       const res = await request(makeApp())
         .get('/shards/shards/location')
@@ -144,21 +165,27 @@ describe('shardRoutes', () => {
       expect(res.body.error).toBe('Internal Server Error');
     });
   });
-});
 
-// Additional coverage: error handling edge cases
-describe('shardRoutes extended coverage', () => {
-  describe('GET /shards/health', () => {
-    it('returns 200 with ok status', async () => {
-      const { default: express } = await import('express');
-      const { default: request } = await import('supertest');
-      const shardRoutes = (await import('../../src/routes/shardRoutes.js')).default;
-      const app = express();
-      app.use(express.json());
-      app.use('/shards', shardRoutes);
-      const res = await request(app).get('/shards/health');
+  describe('GET /shards/all/orders', () => {
+    it('returns the combined order count from all shards', async () => {
+      shardManagerMock.executeQuery.mockResolvedValue([
+        { data: [{ total: '5' }] },
+        { data: [{ total: '7' }] },
+      ]);
+      const res = await request(makeApp()).get('/shards/shards/all/orders');
+
       expect(res.status).toBe(200);
-      expect(res.body.status).toBe('ok');
+      expect(res.body.success).toBe(true);
+      expect(res.body.data.total).toBe(12);
+      expect(res.body.data.shards).toHaveLength(2);
+    });
+
+    it('returns 500 when cross-shard query fails', async () => {
+      const res = await request(makeApp()).get('/shards/shards/all/orders');
+
+      expect(res.status).toBe(500);
+      expect(res.body.success).toBe(false);
+      expect(res.body.error).toBe('Internal Server Error');
     });
   });
 });
