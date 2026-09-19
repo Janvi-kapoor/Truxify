@@ -1,7 +1,12 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { EventStore, EventStoreVersionConflictError, EventStorePersistenceError } from '../event-store.js';
+import {
+  EventStore,
+  EventStoreVersionConflictError,
+  EventStorePersistenceError,
+  createSupabaseDb,
+} from '../event-store.js';
 import { InMemoryDb, dbRow } from './in-memory-db.js';
 
 const silentLogger = {
@@ -40,11 +45,84 @@ function createMockClient() {
   return client;
 }
 
+/**
+ * Faithful mock of the Supabase PostgREST client for event_store.
+ *
+ * Models real PostgREST semantics:
+ * - .upsert() without .select() defaults to Prefer: return=minimal -> { data: null, error: null }
+ * - .upsert().select() sends Prefer: return=representation:
+ *   - new row inserted -> { data: [row], error: null }
+ *   - duplicate onConflict (aggregate_id, version) with ignoreDuplicates: true -> { data: [], error: null }
+ * - database errors return { data: null, error: { message, code } }
+ */
+function createMockSupabaseEventStoreClient({ initialRows = [], errorToThrow = null, latestVersionOverride = undefined } = {}) {
+  const store = new Map();
+  for (const r of initialRows) store.set(`${r.aggregate_id}\0${r.version}`, r);
+
+  return {
+    _store: store,
+    from(table) {
+      if (table !== 'event_store') {
+        return {
+          select: () => ({ eq: () => ({ order: () => ({ limit: () => ({ maybeSingle: async () => ({ data: null, error: null }) }) }) }) }),
+          upsert: () => ({ select: () => Promise.resolve({ data: [], error: null }) }),
+        };
+      }
+      return {
+        select: () => ({
+          eq: (_col, val) => ({
+            order: () => ({
+              limit: () => ({
+                maybeSingle: async () => {
+                  if (errorToThrow) return { data: null, error: errorToThrow };
+                  if (latestVersionOverride !== undefined) {
+                    return { data: latestVersionOverride === null ? null : { version: latestVersionOverride }, error: null };
+                  }
+                  const rows = [...store.values()].filter((r) => r.aggregate_id === val);
+                  return { data: rows.length ? { version: Math.max(...rows.map((r) => r.version)) } : null, error: null };
+                },
+              }),
+            }),
+          }),
+        }),
+        upsert(rows, options = {}) {
+          let withSelect = false;
+          const builder = {
+            select: () => {
+              withSelect = true;
+              return builder;
+            },
+            then: (resolve) => {
+              if (errorToThrow) return resolve({ data: null, error: errorToThrow });
+              if (!withSelect) return resolve({ data: null, error: null });
+              const inserted = [];
+              for (const row of rows) {
+                const key = `${row.aggregate_id}\0${row.version}`;
+                if (store.has(key)) {
+                  if (!options.ignoreDuplicates) {
+                    return resolve({ data: null, error: { code: '23505', message: 'duplicate key' } });
+                  }
+                } else {
+                  store.set(key, row);
+                  inserted.push(row);
+                }
+              }
+              return resolve({ data: inserted, error: null });
+            },
+          };
+          return builder;
+        },
+      };
+    },
+  };
+}
+
 describe('EventStore adapter', () => {
   test('CASE 11: package exposes ESM exports', async () => {
     assert.equal(typeof EventStore, 'function');
     assert.equal(typeof EventStoreVersionConflictError, 'function');
     assert.equal(typeof EventStorePersistenceError, 'function');
+    assert.equal(typeof createSupabaseDb, 'function');
   });
 
   test('CASE 9: rebuildProjections reconstructs read models from persisted rows', async () => {
@@ -120,5 +198,141 @@ describe('EventStore adapter', () => {
       }
     );
     assert.equal(db.rawRows('order_dup').length, 1);
+  });
+
+  describe('createSupabaseDb adapter contract', () => {
+    test('insertEvent returns selected row on successful insert', async () => {
+      const client = createMockSupabaseEventStoreClient();
+      const adapter = createSupabaseDb(client, silentLogger);
+      const row = {
+        event_id: 'e1',
+        event_type: 'ORDER_CREATED',
+        aggregate_id: 'ord_1',
+        payload: { amount: 100 },
+        version: 1,
+        timestamp: new Date().toISOString(),
+      };
+
+      const result = await adapter.insertEvent(row);
+      assert.ok(result.data, 'data must be returned when .select() is chained');
+      assert.equal(result.data.length, 1);
+      assert.equal(result.data[0].event_id, 'e1');
+      assert.equal(result.error, null);
+    });
+
+    test('insertEvent returns empty array on duplicate ignore (version conflict)', async () => {
+      const client = createMockSupabaseEventStoreClient();
+      const adapter = createSupabaseDb(client, silentLogger);
+      const row = {
+        event_id: 'e1',
+        event_type: 'ORDER_CREATED',
+        aggregate_id: 'ord_1',
+        payload: { amount: 100 },
+        version: 1,
+        timestamp: new Date().toISOString(),
+      };
+
+      await adapter.insertEvent(row);
+      const duplicateResult = await adapter.insertEvent({ ...row, event_id: 'e2' });
+      assert.ok(Array.isArray(duplicateResult.data));
+      assert.equal(duplicateResult.data.length, 0, 'ignored duplicate must yield empty array');
+      assert.equal(duplicateResult.error, null);
+    });
+
+    test('insertEvent propagates database error from Supabase', async () => {
+      const dbError = { message: 'connection failure', code: 'PGRST000' };
+      const client = createMockSupabaseEventStoreClient({ errorToThrow: dbError });
+      const adapter = createSupabaseDb(client, silentLogger);
+      const row = {
+        event_id: 'e1',
+        event_type: 'ORDER_CREATED',
+        aggregate_id: 'ord_1',
+        payload: { amount: 100 },
+        version: 1,
+        timestamp: new Date().toISOString(),
+      };
+
+      const result = await adapter.insertEvent(row);
+      assert.equal(result.data, null);
+      assert.equal(result.error, dbError);
+    });
+  });
+
+  describe('EventStore with production Supabase adapter semantics', () => {
+    test('appendEvent succeeds when Supabase insert returns selected row', async () => {
+      const client = createMockSupabaseEventStoreClient();
+      const store = new EventStore({ client, logger: silentLogger });
+
+      const event = await store.appendEvent(
+        'order_supabase_1',
+        { type: 'ORDER_CREATED', payload: { customerId: 'c1', total: 50 } },
+        0
+      );
+
+      assert.equal(event.aggregateId, 'order_supabase_1');
+      assert.equal(event.type, 'ORDER_CREATED');
+      assert.equal(event.version, 1);
+      assert.equal(event.payload.total, 50);
+    });
+
+    test('appendEvent rejects with EventStoreVersionConflictError when duplicate is ignored', async () => {
+      // Seed the store with version 1 (committed by a concurrent command)
+      const existingRow = {
+        event_id: 'e1',
+        event_type: 'ORDER_CREATED',
+        aggregate_id: 'order_supabase_dup',
+        payload: { a: 1 },
+        version: 1,
+        timestamp: new Date().toISOString(),
+      };
+      // latestVersionOverride: 0 simulates a stale read where expectedVersion is 0,
+      // so the pre-check passes and insertEvent(version 1) is invoked against the database.
+      const client = createMockSupabaseEventStoreClient({
+        initialRows: [existingRow],
+        latestVersionOverride: 0,
+      });
+      const store = new EventStore({ client, logger: silentLogger });
+
+      // expectedVersion is 0; pre-check passes because fetchLatestVersion returned 0.
+      // Next version is calculated as 1. When insertEvent is called with version 1,
+      // the unique constraint (aggregate_id, version) triggers ignoreDuplicates: true,
+      // returning { data: [], error: null }.
+      await assert.rejects(
+        () => store.appendEvent(
+          'order_supabase_dup',
+          { type: 'ORDER_CREATED', payload: { a: 2 } },
+          0
+        ),
+        (err) => {
+          assert.ok(err instanceof EventStoreVersionConflictError, `Expected EventStoreVersionConflictError but got ${err?.constructor?.name}`);
+          assert.equal(err.code, 'EVENT_VERSION_CONFLICT');
+          assert.equal(err.aggregateId, 'order_supabase_dup');
+          assert.equal(err.currentVersion, 1);
+          assert.match(err.message, /a concurrent command already committed this version/);
+          return true;
+        }
+      );
+    });
+
+    test('appendEvent propagates database error as typed persistence error', async () => {
+      const dbError = { message: 'relation "event_store" does not exist', code: '42P01' };
+      const client = createMockSupabaseEventStoreClient({ errorToThrow: dbError });
+      const store = new EventStore({ client, logger: silentLogger });
+
+      await assert.rejects(
+        () => store.appendEvent(
+          'order_supabase_err',
+          { type: 'ORDER_CREATED', payload: { a: 1 } },
+          0
+        ),
+        (err) => {
+          assert.ok(err instanceof EventStorePersistenceError, `Expected EventStorePersistenceError but got ${err?.constructor?.name}`);
+          assert.equal(err.code, 'EVENT_PERSISTENCE_ERROR');
+          assert.equal(err.cause?.code, '42P01');
+          assert.equal(err.cause?.message, 'relation "event_store" does not exist');
+          return true;
+        }
+      );
+    });
   });
 });

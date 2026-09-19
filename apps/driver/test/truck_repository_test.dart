@@ -228,6 +228,33 @@ void main() {
       expect(truck.insuranceExpiry, isNull);
       expect(truck.cargoLengthFt, 0.0);
     });
+
+    test('queries trucks table using driver_id column', () async {
+      String? queriedColumn;
+      dynamic queriedValue;
+
+      final client = FakeSupabaseClient(
+        onFrom: (relation) {
+          expect(relation, 'trucks');
+          return FakeSupabaseQueryBuilder(
+            Future.value([truckJson]),
+            onEq: (col, val) {
+              queriedColumn = col;
+              queriedValue = val;
+            },
+          );
+        },
+      );
+
+      final repository = TruckRepository(client: client);
+      final truck = await repository.fetchTruckForDriver(driverId);
+
+      expect(truck, isNotNull);
+      expect(truck!.id, 'truck-1');
+      expect(truck.driverId, 'driver-123');
+      expect(queriedColumn, 'driver_id');
+      expect(queriedValue, driverId);
+    });
   });
 
   group('TruckRepository.fetchMaintenanceTickets', () {

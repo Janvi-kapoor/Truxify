@@ -48,10 +48,14 @@ int trace_file_open(struct trace_event_raw_sys_enter *args)
     char filename[256];
     // args->args[0] is a userspace pointer to the filename; it cannot be
     // dereferenced from kernel context. Probe it into a bounded stack buffer.
-    if (bpf_probe_read_user_str(filename, sizeof(filename), (void *)(long)args->args[0]) < 0) {
+    // The helper returns the number of bytes copied including the trailing NUL
+    // (negative on error). Only the real string is scanned, never stale stack
+    // bytes left behind by prior trace_file_open calls (issue #14940).
+    long name_len = bpf_probe_read_user_str(filename, sizeof(filename), (void *)(long)args->args[0]);
+    if (name_len <= 1) {
         return 0;
     }
-    
+
     // Check for suspicious file extensions
     struct {
         const char *ext;
@@ -61,9 +65,13 @@ int trace_file_open(struct trace_event_raw_sys_enter *args)
         { ".js", 3 }, { ".vbs", 4 }, { ".ps1", 4 }, { ".cmd", 4 },
         { ".jar", 4 }, { ".dll", 4 }, { ".so", 3 }, { ".php", 4 }
     };
-    
+
+    // name_len includes the NUL terminator, so the actual string length is
+    // name_len - 1. Scanning beyond it touches uninitialized stack bytes from
+    // earlier invocations and produces false "suspicious file" detections.
+    int real_len = (int)name_len - 1;
     for (int i = 0; i < 12; i++) {
-        if (str_contains(filename, sizeof(filename), suspicious_extensions[i].ext, suspicious_extensions[i].len)) {
+        if (str_contains(filename, real_len, suspicious_extensions[i].ext, suspicious_extensions[i].len)) {
             bpf_printk("Suspicious file opened: %s\n", filename);
         }
     }

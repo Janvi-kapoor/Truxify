@@ -118,7 +118,7 @@ class DigilockerService {
         };
       } catch (err) {
         logger.error({ err }, '[DigilockerService] OAuth exchange failed');
-        return { success: false, error: err.message };
+        return { success: false, error: (err?.message ?? String(err)) };
       }
     }
 
@@ -140,6 +140,8 @@ class DigilockerService {
       return { success: false, error: 'DigiLocker verification is not configured', is_digilocker_verified: false };
     }
     logger.info(`[DigilockerService] Verifying documents for user ${userId} with token ${accessToken}`);
+
+
 
     const dlData = {
       doc_type: 'driving_licence',
@@ -185,7 +187,7 @@ class DigilockerService {
         logger.info(`[DigilockerService] Smart contract write succeeded. TX hash: ${tx.hash}`);
       } catch (err) {
         logger.error({ err }, '[DigilockerService] Smart contract write failed');
-        throw new Error(`On-chain document hash write failed: ${err.message}`, { cause: err });
+        throw new Error(`On-chain document hash write failed: ${(err?.message ?? String(err))}`, { cause: err });
       }
     } else {
       logger.info(`[DigilockerService] KYC verifier contract address/private key not set. Mocking on-chain hash submission.`);
@@ -236,7 +238,7 @@ class DigilockerService {
         tokenData = tokenResponse.data;
       } catch (err) {
         logger.error({ err }, 'Digilocker token exchange failed');
-        throw new Error('Digilocker token exchange failed: ' + err.message, { cause: err });
+        throw new Error('Digilocker token exchange failed: ' + (err?.message ?? String(err)), { cause: err });
       }
     }
 
@@ -283,7 +285,7 @@ class DigilockerService {
         }
       } catch (err) {
         logger.error({ err }, 'Failed to fetch DigiLocker documents');
-        throw new Error('Failed to fetch DigiLocker documents: ' + err.message, { cause: err });
+        throw new Error('Failed to fetch DigiLocker documents: ' + (err?.message ?? String(err)), { cause: err });
       }
     }
 
@@ -387,16 +389,30 @@ class DigilockerService {
         error: syncErrors.join('; '),
         syncedDocumentsCount: syncResults.length,
         documents: syncResults,
-        isMock
+        isMock,
+        is_digilocker_verified: false,
       };
+    }
+
+    if (syncResults.length > 0) {
+      const { error: profileUpdateErr } = await supabaseAdmin
+        .from('profiles')
+        .update({ is_digilocker_verified: true })
+        .eq('id', driverId);
+
+      if (profileUpdateErr) {
+        logger.error(`[DigilockerService] Failed to update profile is_digilocker_verified for ${driverId}:`, profileUpdateErr.message);
+      }
     }
 
     return {
       success: true,
       syncedDocumentsCount: syncResults.length,
       documents: syncResults,
-      isMock
+      isMock,
+      is_digilocker_verified: syncResults.length > 0,
     };
+
   }
 }
 

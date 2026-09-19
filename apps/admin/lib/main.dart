@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+﻿import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
@@ -7,7 +7,7 @@ import 'utils/support_ticket_parser.dart';
 /// Backend connection settings, injected at build time via --dart-define.
 class AdminApiConfig {
   static const String _envUrl = String.fromEnvironment('ADMIN_API_URL');
-  static const String _envToken = String.fromEnvironment('ADMIN_API_TOKEN');
+  // static const String _envToken removed for security (#14937)
 
   static String get baseUrl {
     final url = _envUrl.isNotEmpty ? _envUrl : 'http://localhost:5000';
@@ -22,7 +22,7 @@ class AdminApiConfig {
     return url;
   }
 
-  static String? get authToken => _envToken.isNotEmpty ? _envToken : null;
+  static String? get authToken => null;
 }
 
 void main() {

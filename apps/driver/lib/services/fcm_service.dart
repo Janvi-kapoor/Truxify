@@ -67,14 +67,15 @@ class FcmService {
     }
   }
 
-  static Future<void> _unregisterTokenFromBackend(String token) async {
+  @visibleForTesting
+  static Future<void> unregisterTokenFromBackend(String token, {ApiClient? client}) async {
     final firebaseUser = FirebaseAuth.instance.currentUser;
     if (firebaseUser == null) {
       debugPrint('[FCM] No authenticated user, skipping token unregister.');
       return;
     }
 
-    final apiClient = ApiClient();
+    final apiClient = client ?? ApiClient();
     try {
       await apiClient.post(
         '/api/devices/unregister',
@@ -86,26 +87,32 @@ class FcmService {
     } catch (e) {
       debugPrint('[FCM] Failed to unregister device token: $e');
     } finally {
-      apiClient.dispose();
+      if (client == null) {
+        apiClient.dispose();
+      }
     }
   }
 
+  static Future<void> _unregisterTokenFromBackend(String token) =>
+      unregisterTokenFromBackend(token);
+
   static Future<void> clearToken() async {
     try {
-      await _sendTokenToBackend(null);
+      await sendTokenToBackend(null);
     } catch (e) {
       debugPrint('[FCM] Clearing token failed: $e');
     }
   }
 
-  static Future<void> _sendTokenToBackend(String? token) async {
+  @visibleForTesting
+  static Future<void> sendTokenToBackend(String? token, {ApiClient? client}) async {
     final firebaseUser = FirebaseAuth.instance.currentUser;
     final userId = firebaseUser?.uid;
     if (userId == null) {
       debugPrint('[FCM] No authenticated user, skipping token upload.');
       return;
     }
-    final apiClient = ApiClient();
+    final apiClient = client ?? ApiClient();
     try {
       await apiClient.put(
         '/api/profile/fcm-token',
@@ -117,8 +124,12 @@ class FcmService {
     } catch (e) {
       debugPrint('[FCM] Failed to update token on backend: $e');
     } finally {
-      apiClient.dispose();
+      if (client == null) {
+        apiClient.dispose();
+      }
     }
   }
+
+  static Future<void> _sendTokenToBackend(String? token) => sendTokenToBackend(token);
 }
 export 'package:truxify_shared/src/services/fcm_service.dart' hide FcmService;

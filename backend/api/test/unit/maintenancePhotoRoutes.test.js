@@ -1,9 +1,16 @@
+/**
+ * Unit tests for backend/api/src/routes/maintenancePhotoRoutes.js
+ */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import express from 'express';
 import request from 'supertest';
 
 vi.mock('../../src/middleware/auth.js', () => ({
-  authenticate: (req, _res, next) => { req.user = req.user || { id: 'driver-1' }; next(); },
+  authenticate: (req, _res, next) => {
+    req.user = req.user || { id: 'driver-1' };
+    req.token = req.token || 'mock-jwt-token';
+    next();
+  },
   requireRole: () => (_req, _res, next) => next(),
 }));
 
@@ -24,11 +31,6 @@ vi.mock('../../src/middleware/validate.js', () => ({
 vi.mock('../../src/middleware/logger.js', () => ({
   default: { error: vi.fn(), info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
 }));
-
-// Multer must NOT be mocked — supertest's .attach() sends real multipart data.
-// Instead, use a real but in-memory multer instance for the route.
-import multer from 'multer';
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024 } });
 
 const { supabase, supabaseAdmin, createUserClient } = vi.hoisted(() => ({
   supabase: {
@@ -87,6 +89,8 @@ function makeApp() {
 }
 
 describe('maintenancePhotoRoutes', () => {
+  const VALID_TICKET_ID = 'ticket-123';
+
   beforeEach(() => {
     vi.clearAllMocks();
     uploadMaintenancePhotos.mockImplementation((req, res) => {
@@ -102,20 +106,8 @@ describe('maintenancePhotoRoutes', () => {
     });
   });
 
-  const VALID_TICKET_ID = 'ticket-123';
-  const MOCK_TOKEN = { sub: 'driver-1', role: 'driver' };
-
   describe('POST /maintenance/:ticketId/photos', () => {
-    it('mp1: returns 200 with single photo upload', async () => {
-      const mockFile = {
-        fieldname: 'photos',
-        originalname: 'photo1.jpg',
-        encoding: '7bit',
-        mimetype: 'image/jpeg',
-        buffer: Buffer.from('fake-image-data'),
-        size: 1024,
-      };
-
+    it('returns 200 with single photo upload', async () => {
       const res = await request(makeApp())
         .post(`/maintenance/${VALID_TICKET_ID}/photos`)
         .attach('photos', Buffer.from('fake-image-data'), {
@@ -128,7 +120,7 @@ describe('maintenancePhotoRoutes', () => {
       expect(res.body.uploaded_count).toBe(1);
     });
 
-    it('mp2: returns 200 with multiple photo uploads', async () => {
+    it('returns 200 with multiple photo uploads', async () => {
       const res = await request(makeApp())
         .post(`/maintenance/${VALID_TICKET_ID}/photos`)
         .attach('photos', Buffer.from('fake-image-1'), {
@@ -146,7 +138,7 @@ describe('maintenancePhotoRoutes', () => {
       expect(res.body.photo_urls).toHaveLength(2);
     });
 
-    it('mp3: returns 200 with PNG image upload', async () => {
+    it('returns 200 with PNG image upload', async () => {
       const res = await request(makeApp())
         .post(`/maintenance/${VALID_TICKET_ID}/photos`)
         .attach('photos', Buffer.from('fake-png-data'), {
@@ -158,7 +150,20 @@ describe('maintenancePhotoRoutes', () => {
       expect(res.body.success).toBe(true);
     });
 
-    it('mp4: returns 400 when no files are uploaded', async () => {
+    it('filters out non-image files via multer fileFilter', async () => {
+      // Non-image files (e.g. application/pdf) are ignored by fileFilter, so req.files is empty
+      const res = await request(makeApp())
+        .post(`/maintenance/${VALID_TICKET_ID}/photos`)
+        .attach('photos', Buffer.from('%PDF-fake-pdf'), {
+          filename: 'document.pdf',
+          contentType: 'application/pdf',
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain('At least one photo file is required');
+    });
+
+    it('returns 400 when no files are uploaded', async () => {
       const res = await request(makeApp())
         .post(`/maintenance/${VALID_TICKET_ID}/photos`);
 
@@ -166,8 +171,8 @@ describe('maintenancePhotoRoutes', () => {
       expect(res.body.error).toContain('At least one photo file is required');
     });
 
-    it('mp5: handles controller returning photo_urls array', async () => {
-      uploadMaintenancePhotos.mockImplementation((req, res) => {
+    it('handles controller returning photo_urls array', async () => {
+      uploadMaintenancePhotos.mockImplementation((_req, res) => {
         return res.status(200).json({
           success: true,
           photo_urls: [
@@ -188,7 +193,7 @@ describe('maintenancePhotoRoutes', () => {
       expect(res.body.photo_urls[0]).toContain('storage.example.com');
     });
 
-    it('mp6: includes ticketId in response context', async () => {
+    it('passes ticketId parameter correctly to controller', async () => {
       uploadMaintenancePhotos.mockImplementation((req, res) => {
         expect(req.params.ticketId).toBe(VALID_TICKET_ID);
         return res.status(200).json({
@@ -208,10 +213,11 @@ describe('maintenancePhotoRoutes', () => {
       expect(res.status).toBe(200);
     });
 
-    it('mp7: includes user context from auth middleware', async () => {
+    it('passes authenticated user and token context to controller', async () => {
       uploadMaintenancePhotos.mockImplementation((req, res) => {
         expect(req.user).toBeDefined();
         expect(req.user.id).toBe('driver-1');
+        expect(req.token).toBe('mock-jwt-token');
         return res.status(200).json({
           success: true,
           photo_urls: ['https://storage.example.com/photo1.jpg'],
@@ -229,26 +235,36 @@ describe('maintenancePhotoRoutes', () => {
       expect(res.status).toBe(200);
     });
 
-    it('mp8: handles route with different ticket ID format', async () => {
-      const customTicketId = 'custom-ticket-456';
-
-      uploadMaintenancePhotos.mockImplementation((req, res) => {
-        expect(req.params.ticketId).toBe(customTicketId);
-        return res.status(200).json({
-          success: true,
-          photo_urls: ['https://storage.example.com/photo1.jpg'],
-          uploaded_count: 1,
-        });
+    it('propagates controller error status codes (e.g. 403 forbidden)', async () => {
+      uploadMaintenancePhotos.mockImplementation((_req, res) => {
+        return res.status(403).json({ error: 'You do not have permission to upload photos to this ticket' });
       });
 
       const res = await request(makeApp())
-        .post(`/maintenance/${customTicketId}/photos`)
+        .post(`/maintenance/${VALID_TICKET_ID}/photos`)
         .attach('photos', Buffer.from('fake-image-data'), {
           filename: 'photo1.jpg',
           contentType: 'image/jpeg',
         });
 
-      expect(res.status).toBe(200);
+      expect(res.status).toBe(403);
+      expect(res.body.error).toContain('You do not have permission');
+    });
+
+    it('propagates controller 404 when ticket is not found', async () => {
+      uploadMaintenancePhotos.mockImplementation((_req, res) => {
+        return res.status(404).json({ error: 'Maintenance ticket not found' });
+      });
+
+      const res = await request(makeApp())
+        .post('/maintenance/nonexistent-ticket/photos')
+        .attach('photos', Buffer.from('fake-image-data'), {
+          filename: 'photo1.jpg',
+          contentType: 'image/jpeg',
+        });
+
+      expect(res.status).toBe(404);
+      expect(res.body.error).toBe('Maintenance ticket not found');
     });
   });
 });

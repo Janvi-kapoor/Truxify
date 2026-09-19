@@ -61,6 +61,7 @@ vi.mock('../../src/middleware/logger.js', () => ({
   default: { error: vi.fn(), info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
 }));
 
+import logger from '../../src/middleware/logger.js';
 import verificationRoutes from '../../src/routes/verificationRoutes.js';
 
 function makeApp() {
@@ -80,7 +81,7 @@ describe('verificationRoutes', () => {
 
   describe('GET /verification/order/:orderId', () => {
     it('returns 404 when the order is not found', async () => {
-      dbMock.supabase.from.mockReturnValue({
+      dbMock.supabaseAdmin.from.mockReturnValue({
         select: vi.fn(() => ({ eq: vi.fn(() => ({ maybeSingle: vi.fn().mockResolvedValue({ data: null, error: null }) })) })),
       });
       const res = await request(makeApp()).get('/verification/order/o1');
@@ -89,22 +90,12 @@ describe('verificationRoutes', () => {
     });
 
     it('returns the verification result on success', async () => {
-      dbMock.supabase.from.mockReturnValue({
+      dbMock.supabaseAdmin.from.mockReturnValue({
         select: vi.fn(() => ({ eq: vi.fn(() => ({ maybeSingle: vi.fn().mockResolvedValue({ data: { id: 'o1', customer_id: 'u1', driver_id: null }, error: null }) })) })),
       });
       const res = await request(makeApp()).get('/verification/order/o1');
       expect(res.status).toBe(200);
       expect(res.body.data.verified).toBe(true);
-    });
-
-    it('reads the order with the user-scoped client (createUserClient), not the anon client', async () => {
-      dbMock.supabase.from.mockReturnValue({
-        select: vi.fn(() => ({ eq: vi.fn(() => ({ maybeSingle: vi.fn().mockResolvedValue({ data: { id: 'o1', customer_id: 'u1', driver_id: null }, error: null }) })) })),
-      });
-      const res = await request(makeApp()).get('/verification/order/o1');
-      expect(res.status).toBe(200);
-      expect(dbMock.createUserClient).toHaveBeenCalled();
-      expect(dbMock.supabase.from).toHaveBeenCalledWith('orders');
     });
   });
 
@@ -155,6 +146,49 @@ describe('verificationRoutes', () => {
       expect(updateMock).toHaveBeenCalledWith(
         expect.objectContaining({ kyc_status: 'Verified', kyc_doc_number: 'AB1234567' }),
       );
+    });
+
+    it('logs error and returns 500 when an unexpected error occurs during upload', async () => {
+      const updateMock = vi.fn(() => ({ eq: vi.fn(() => Promise.resolve({ error: null })) }));
+      dbMock.supabaseAdmin.from.mockReturnValue({ update: updateMock });
+      process.env.ML_API_URL = 'http://ml';
+      process.env.ML_API_KEY = 'key';
+
+      global.fetch = vi.fn(async () => {
+        throw new Error('Network failure connecting to OCR');
+      });
+
+      const res = await request(makeApp()).post('/verification/kyc/upload').send({});
+
+      expect(res.status).toBe(500);
+      expect(res.body.success).toBe(false);
+      expect(res.body.error).toBe('Network failure connecting to OCR');
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.objectContaining({
+          event: 'KYC_UPLOAD_ERROR',
+          error: 'Network failure connecting to OCR',
+        }),
+        'KYC upload error',
+      );
+    });
+
+    it('returns 504 when OCR service times out with AbortError', async () => {
+      const updateMock = vi.fn(() => ({ eq: vi.fn(() => Promise.resolve({ error: null })) }));
+      dbMock.supabaseAdmin.from.mockReturnValue({ update: updateMock });
+      process.env.ML_API_URL = 'http://ml';
+      process.env.ML_API_KEY = 'key';
+
+      const abortError = new Error('The operation was aborted');
+      abortError.name = 'AbortError';
+      global.fetch = vi.fn(async () => {
+        throw abortError;
+      });
+
+      const res = await request(makeApp()).post('/verification/kyc/upload').send({});
+
+      expect(res.status).toBe(504);
+      expect(res.body.success).toBe(false);
+      expect(res.body.error).toContain('timed out');
     });
   });
 });

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+﻿import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { CircuitBreaker, CircuitState } from '../../src/lib/circuitBreaker.js';
 
 describe('CircuitBreaker', () => {
@@ -121,4 +121,12 @@ describe('CircuitBreaker', () => {
       expect(cb.failureCount).toBe(0);
     });
   });
+
+    it('handles synchronous throw correctly without leaving timer undefined', async () => {
+        const syncThrowFn = vi.fn().mockImplementation(() => {
+            throw new Error('sync boom');
+        });
+        await expect(cb.execute(syncThrowFn)).rejects.toThrow('sync boom');
+        expect(cb.failureCount).toBe(1);
+    });
 });

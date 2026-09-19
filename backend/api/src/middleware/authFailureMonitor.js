@@ -73,38 +73,6 @@ function cleanExpiredRecords() {
 const gcTimer = setInterval(cleanExpiredRecords, GC_INTERVAL_MS);
 if (gcTimer.unref) gcTimer.unref();
 
-// ==========================================
-// 3. ADMIN MANAGEMENT API
-// ==========================================
-
-const SecurityAdmin = {
-  blockIP(ip, durationMs = DEFAULT_BAN_DURATION_MS) {
-    blockedIPs.set(ip, Date.now() + durationMs);
-    failures.delete(ip);
-    logger.warn({ ip, durationMs }, '[Security Engine] Manual IP Ban applied');
-  },
-
-  unblockIP(ip) {
-    blockedIPs.delete(ip);
-    failures.delete(ip);
-    logger.info({ ip }, '[Security Engine] IP manually unblocked');
-  },
-
-  allowlistIP(ip) {
-    allowlistedIPs.add(ip);
-    blockedIPs.delete(ip);
-    failures.delete(ip);
-  },
-
-  getMetrics() {
-    return {
-      trackedIPCount: failures.size,
-      blockedIPCount: blockedIPs.size,
-      blockedIPs: Array.from(blockedIPs.keys()),
-      allowlistedIPs: Array.from(allowlistedIPs)
-    };
-  }
-};
 
 // ==========================================
 // 4. CORE MIDDLEWARE ENGINE
@@ -231,4 +199,3 @@ export async function checkBoundOrFailClosed(redis, ip, opts = {}) {
     throw err;
   }
 }
-

@@ -6,6 +6,7 @@ vi.mock('../../src/lib/profileCache.js', () => ({
   invalidateCachedProfile: vi.fn(),
   invalidateCachedSupabaseProfile: vi.fn(),
   invalidateCachedSupabaseProfileAll: vi.fn(),
+  invalidateProfileCache: vi.fn(),
   getCachedProfile: vi.fn(),
   setCachedProfile: vi.fn(),
   getCachedSupabaseProfile: vi.fn(),
@@ -16,13 +17,14 @@ vi.mock('../../src/lib/profileCache.js', () => ({
   setCachedDriverDetails: vi.fn(),
 }));
 
-const { invalidateCachedProfile, invalidateCachedSupabaseProfileAll } = await import('../../src/lib/profileCache.js');
+const { invalidateCachedProfile, invalidateCachedSupabaseProfileAll, invalidateProfileCache } = await import('../../src/lib/profileCache.js');
 
 const { createSupabaseMock } = await vi.importActual('../helpers/supabaseMock.js');
 const m = createSupabaseMock();
 
 vi.mock('../../src/config/db.js', () => ({
   supabase: m.supabase,
+  supabaseAdmin: m.supabase,
   firebaseAdmin: null,
   redisClient: null,
   mongoDb: null,
@@ -47,6 +49,12 @@ const DRIVER_HEADERS = {
   'x-user-id': 'driver-uuid-456',
   'x-user-role': 'driver',
   'x-user-name': 'Test Driver',
+};
+
+const ADMIN_HEADERS = {
+  'x-user-id': 'admin-uuid-789',
+  'x-user-role': 'admin',
+  'x-user-name': 'Test Admin',
 };
 
 describe('Profile Routes', () => {
@@ -554,8 +562,49 @@ describe('Profile Routes', () => {
 
       expect(res.status).toBe(200);
       expect(res.headers['content-type']).toContain('text/csv');
+      expect(res.headers['content-disposition']).toBe('attachment; filename="driver_statement.csv"');
       expect(res.text).toContain('"order-1"');
       expect(res.text).toContain('"10000"');
+    });
+
+    it('sorts statement trips properly in CSV format when sort_by=net_earnings and format=csv are both passed', async () => {
+      m.store.orders.push(
+        {
+          id: 'order-low-earn',
+          driver_id: 'driver-uuid-456',
+          status: 'delivered',
+          pickup_address: '=FormulaInjection',
+          drop_address: 'B',
+          pickup_date: '2026-06-01',
+          base_freight: 10000,
+          platform_fee: 1000,
+          toll_estimate: 0
+        },
+        {
+          id: 'order-high-earn',
+          driver_id: 'driver-uuid-456',
+          status: 'delivered',
+          pickup_address: 'C',
+          drop_address: 'D',
+          pickup_date: '2026-06-05',
+          base_freight: 30000,
+          platform_fee: 1000,
+          toll_estimate: 0
+        }
+      );
+
+      const res = await request(buildApp())
+        .get('/api/profile/driver/statement?sort_by=net_earnings&format=csv')
+        .set(DRIVER_HEADERS);
+
+      expect(res.status).toBe(200);
+      expect(res.headers['content-type']).toContain('text/csv');
+      expect(res.headers['content-disposition']).toBe('attachment; filename="driver_statement.csv"');
+      const lines = res.text.split('\n');
+      expect(lines[1]).toContain('"order-high-earn"');
+      expect(lines[2]).toContain('"order-low-earn"');
+      // Verify formula injection escaped with single quote
+      expect(res.text).toContain('"' + "'=FormulaInjection" + '"');
     });
 
     it('sorts statement trips by net earnings when sort_by=net_earnings is passed', async () => {
@@ -735,6 +784,70 @@ describe('Profile Routes', () => {
       expect(res.body.averageRating).toBe(5);
       expect(res.body.onTimePercentage).toBe(100);
       expect(res.body.insufficientData).toEqual({ distanceKm: true, rating: false, onTime: false });
+    });
+  });
+
+  describe('DELETE /api/profile/admin/cache/:userId', () => {
+    it('returns 200 and invalidates cache when called by an admin with a valid user UUID', async () => {
+      m.store.profiles.push({
+        id: '11111111-1111-1111-1111-111111111111',
+        firebase_uid: 'firebase-user-111',
+        role: 'driver',
+        full_name: 'Driver One',
+      });
+
+      const res = await request(buildApp())
+        .delete('/api/profile/admin/cache/11111111-1111-1111-1111-111111111111')
+        .set(ADMIN_HEADERS);
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.message).toContain('Cache invalidated for user 11111111-1111-1111-1111-111111111111');
+      expect(invalidateCachedProfile).toHaveBeenCalledWith('firebase-user-111');
+      expect(invalidateCachedSupabaseProfileAll).toHaveBeenCalledWith('11111111-1111-1111-1111-111111111111');
+    });
+
+    it('returns 200 and invalidates cache when target is looked up by Firebase UID', async () => {
+      m.store.profiles.push({
+        id: '22222222-2222-2222-2222-222222222222',
+        firebase_uid: 'firebase-uid-222',
+        role: 'customer',
+        full_name: 'Customer Two',
+      });
+
+      const res = await request(buildApp())
+        .delete('/api/profile/admin/cache/firebase-uid-222')
+        .set(ADMIN_HEADERS);
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(invalidateCachedProfile).toHaveBeenCalledWith('firebase-uid-222');
+      expect(invalidateCachedSupabaseProfileAll).toHaveBeenCalledWith('22222222-2222-2222-2222-222222222222');
+    });
+
+    it('returns 404 when user profile does not exist', async () => {
+      const res = await request(buildApp())
+        .delete('/api/profile/admin/cache/33333333-3333-3333-3333-333333333333')
+        .set(ADMIN_HEADERS);
+
+      expect(res.status).toBe(404);
+      expect(res.body.error).toBe('Profile not found.');
+    });
+
+    it('returns 403 when called by a non-admin role (customer)', async () => {
+      const res = await request(buildApp())
+        .delete('/api/profile/admin/cache/11111111-1111-1111-1111-111111111111')
+        .set(CUSTOMER_HEADERS);
+
+      expect(res.status).toBe(403);
+    });
+
+    it('returns 403 when called by a non-admin role (driver)', async () => {
+      const res = await request(buildApp())
+        .delete('/api/profile/admin/cache/11111111-1111-1111-1111-111111111111')
+        .set(DRIVER_HEADERS);
+
+      expect(res.status).toBe(403);
     });
   });
 });

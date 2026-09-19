@@ -1,28 +1,17 @@
-import 'dart:convert';
+﻿import 'dart:convert';
 import 'package:flutter/foundation.dart';
-import 'package:http/http.dart' as http;
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'api_client.dart';
 
 class HosService {
-  static String get _defaultApiBaseUrl => ApiClient.defaultBaseUrl;
-
   /// Statuses: 'off_duty', 'on_duty', 'driving', 'resting'
   static Future<bool> updateStatus(String status) async {
     try {
-      final session = Supabase.instance.client.auth.currentSession;
-      final token = session?.accessToken;
-      if (token == null) return false;
-
-      final url = Uri.parse('$_defaultApiBaseUrl/api/driver/hos/status');
-      final response = await http.put(
-        url,
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer $token',
-        },
-        body: jsonEncode({'status': status}),
+      // Use ApiClient to automatically handle token refresh and 401 retries (#14935)
+      final response = await ApiClient.put(
+        '/api/driver/hos/status',
+        body: {'status': status},
       );
 
       if (response.statusCode >= 200 && response.statusCode < 300) {

@@ -50,7 +50,7 @@
  */
 
 import express from 'express';
-import { supabaseAdmin } from '../config/db.js';
+import { supabaseAdmin, redisClient } from '../config/db.js';
 import { authenticate, requireRole } from '../middleware/auth.js';
 import { requirePolicy } from '../middleware/requirePolicy.js';
 import { userLimiter } from '../middleware/rateLimiter.js';
@@ -208,7 +208,13 @@ router.get('/', authenticate, userLimiter, requirePolicy('load-offer:browse'), v
 
     // Filters
     if (req.query.pickup_location) {
-      const pickupLocation = (Array.isArray(req.query.pickup_location) ? req.query.pickup_location[0] : req.query.pickup_location).trim();
+      if (Array.isArray(req.query.pickup_location)) {
+        return res.status(400).json({ error: 'Repeated pickup_location parameters are not allowed' });
+      }
+      if (typeof req.query.pickup_location !== 'string') {
+        return res.status(400).json({ error: 'pickup_location must be a single string' });
+      }
+      const pickupLocation = req.query.pickup_location.trim();
       if (!pickupLocation) {
         return res.status(400).json({ error: 'pickup_location must not be empty' });
       }
@@ -218,7 +224,13 @@ router.get('/', authenticate, userLimiter, requirePolicy('load-offer:browse'), v
       query = query.ilike('pickup_address', `%${escapeLike(pickupLocation)}%`);
     }
     if (req.query.destination) {
-      const destination = (Array.isArray(req.query.destination) ? req.query.destination[0] : req.query.destination).trim();
+      if (Array.isArray(req.query.destination)) {
+        return res.status(400).json({ error: 'Repeated destination parameters are not allowed' });
+      }
+      if (typeof req.query.destination !== 'string') {
+        return res.status(400).json({ error: 'destination must be a string' });
+      }
+      const destination = req.query.destination.trim();
       if (!destination) {
         return res.status(400).json({ error: 'destination must not be empty' });
       }
@@ -291,12 +303,26 @@ router.get('/', authenticate, userLimiter, requirePolicy('load-offer:browse'), v
       vehicle_type: 'Truck'
     }));
 
+    const totalCount = count || 0;
+    const totalPages = Math.ceil(totalCount / limit);
+    const hasNextPage = page * limit < totalCount;
+
     res.json({
+      success: true,
       page,
       limit,
-      total: count || 0,
-      totalPages: Math.ceil((count || 0) / limit),
-      loads: formattedLoads
+      total: totalCount,
+      totalPages,
+      hasNextPage,
+      loads: formattedLoads,
+      data: formattedLoads,
+      pagination: {
+        page,
+        limit,
+        total: totalCount,
+        totalPages,
+        hasNextPage,
+      }
     });
 
   } catch (err) {
@@ -349,6 +375,155 @@ router.post('/', authenticate, userLimiter, requireRole(['customer']), validateB
   } catch (err) {
     logger.error('Internal Server Error in POST /api/loads:', err);
     res.status(500).json({ error: 'Internal Server Error' });
+  }
+});
+
+// ============================================================================
+// 1.8 GET LOAD STATISTICS (DRIVER)
+// GET /api/loads/stats
+// ============================================================================
+/**
+ * @openapi
+ * /api/loads/stats:
+ *   get:
+ *     tags: [Loads]
+ *     summary: Get aggregate load metrics
+ *     description: Returns aggregate marketplace load statistics including active loads, average/min/max freight price, average distance, and nearby loads. Cached for 60 seconds.
+ *     security:
+ *       - BearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: vehicleType
+ *         schema:
+ *           type: string
+ *         description: Optional vehicle type filter (e.g., mini_truck, truck)
+ *     responses:
+ *       200:
+ *         description: Aggregate load statistics
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 vehicleType:
+ *                   type: string
+ *                 activeLoads:
+ *                   type: integer
+ *                 avgFreightPrice:
+ *                   type: number
+ *                 minFreightPrice:
+ *                   type: number
+ *                 maxFreightPrice:
+ *                   type: number
+ *                 avgDistance:
+ *                   type: number
+ *                 nearbyLoads:
+ *                   type: integer
+ *                 lastUpdated:
+ *                   type: string
+ */
+router.get('/stats', authenticate, userLimiter, requirePolicy('load-offer:browse'), async (req, res) => {
+  const vehicleType = req.query.vehicleType || req.query.vehicle_type || null;
+
+  if (vehicleType && typeof vehicleType !== 'string') {
+    return res.status(400).json({ error: 'vehicleType must be a string' });
+  }
+
+  const normalizedVehicle = vehicleType ? vehicleType.trim() : null;
+  const cacheKey = `loads:stats:${normalizedVehicle ? normalizedVehicle.toLowerCase() : 'all'}`;
+
+  // Check Redis cache (60s TTL)
+  if (redisClient) {
+    try {
+      const cached = await redisClient.get(cacheKey);
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        return res.json({ success: true, ...parsed });
+      }
+    } catch (cacheErr) {
+      logger.warn({ err: cacheErr.message }, 'Failed to read load stats from Redis cache');
+    }
+  }
+
+  try {
+    let statsData = null;
+
+    // 1. Try Supabase RPC get_load_stats
+    if (supabaseAdmin && typeof supabaseAdmin.rpc === 'function') {
+      const { data, error } = await supabaseAdmin.rpc('get_load_stats', {
+        p_vehicle_type: normalizedVehicle,
+      });
+
+      if (!error && data) {
+        statsData = typeof data === 'string' ? JSON.parse(data) : data;
+      }
+    }
+
+    // 2. Fallback to direct DB query if RPC is not available or failed
+    if (!statsData) {
+      let query = supabaseAdmin
+        .from('load_offers')
+        .select('freight_value, extra_distance_km')
+        .eq('status', 'available');
+
+      const { data: rows, error } = await query;
+
+      if (error) {
+        logger.error('Failed to fetch load stats from DB:', error);
+        return res.status(500).json({ error: 'Failed to fetch load statistics' });
+      }
+
+      const activeLoads = rows ? rows.length : 0;
+      let sumFreight = 0;
+      let minFreight = activeLoads > 0 ? Infinity : 0;
+      let maxFreight = 0;
+      let sumDistance = 0;
+      let distanceCount = 0;
+      let nearbyLoads = 0;
+
+      for (const row of rows || []) {
+        const valInr = (Number(row.freight_value) || 0) / 100;
+        sumFreight += valInr;
+        if (valInr < minFreight) minFreight = valInr;
+        if (valInr > maxFreight) maxFreight = valInr;
+
+        if (row.extra_distance_km !== null && row.extra_distance_km !== undefined) {
+          const dist = Number(row.extra_distance_km) || 0;
+          sumDistance += dist;
+          distanceCount++;
+          if (dist <= 50) nearbyLoads++;
+        } else {
+          nearbyLoads++;
+        }
+      }
+
+      statsData = {
+        vehicleType: normalizedVehicle || 'all',
+        activeLoads,
+        avgFreightPrice: activeLoads > 0 ? Number((sumFreight / activeLoads).toFixed(2)) : 0,
+        minFreightPrice: minFreight === Infinity ? 0 : minFreight,
+        maxFreightPrice: maxFreight,
+        avgDistance: distanceCount > 0 ? Number((sumDistance / distanceCount).toFixed(2)) : 0,
+        nearbyLoads,
+        lastUpdated: new Date().toISOString(),
+      };
+    }
+
+    // Cache in Redis for 60 seconds
+    if (redisClient && statsData) {
+      try {
+        await redisClient.set(cacheKey, JSON.stringify(statsData), 'EX', 60);
+      } catch (cacheSetErr) {
+        logger.warn({ err: cacheSetErr.message }, 'Failed to cache load stats in Redis');
+      }
+    }
+
+    return res.json({ success: true, ...statsData });
+  } catch (err) {
+    logger.error('Internal Server Error in GET /api/loads/stats:', err);
+    return res.status(500).json({ error: 'Internal Server Error' });
   }
 });
 

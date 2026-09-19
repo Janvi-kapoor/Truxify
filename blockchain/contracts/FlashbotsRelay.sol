@@ -1,7 +1,8 @@
-// SPDX-License-Identifier: MIT
+﻿// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
 import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 interface IFlashbotsRelay {
     function submitBundle(
@@ -10,7 +11,7 @@ interface IFlashbotsRelay {
     ) external returns (bytes32);
 }
 
-contract FlashbotsRelay is Ownable {
+contract FlashbotsRelay is Ownable, ReentrancyGuard {
     IFlashbotsRelay public relay;
     mapping(bytes32 => bool) public submittedBundles;
     mapping(bytes32 => uint256) public bundleResults;
@@ -25,13 +26,15 @@ contract FlashbotsRelay is Ownable {
     function submitBundle(
         bytes[] calldata signedTxs,
         uint256 blockNumber
-    ) external onlyOwner returns (bytes32) {
+    ) external onlyOwner nonReentrant returns (bytes32) {
         bytes32 bundleId = keccak256(abi.encode(signedTxs, blockNumber));
         require(!submittedBundles[bundleId], "Bundle already submitted");
 
-        bytes32 result = relay.submitBundle(signedTxs, blockNumber);
+        // Effects updated before external interaction (CEI Pattern)
         submittedBundles[bundleId] = true;
         bundleResults[bundleId] = blockNumber;
+
+        bytes32 result = relay.submitBundle(signedTxs, blockNumber);
 
         emit BundleSubmitted(bundleId, blockNumber);
         emit BundleExecuted(bundleId, true);

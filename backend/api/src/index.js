@@ -7,11 +7,8 @@ import http from 'http'
 import dotenv from 'dotenv'
 import path from 'path'
 import { fileURLToPath } from 'url'
-
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
-
-const { attachLocationServer } = require("./websocket/locationServer");
 
 dotenv.config({ path: path.resolve(__dirname, '../.env') })
 dotenv.config({ path: path.resolve(__dirname, '../../../.env') })
@@ -70,8 +67,12 @@ import userRoutes from './routes/userRoutes.js'
 import voiceRoutes from './routes/voiceRoutes.js'
 import voiceAssistantRoutes from './routes/voice.routes.js'
 import roadConditionRoutes from './routes/roadConditionRoutes.js'
+import biometricAuthRoutes from './routes/biometricAuthRoutes.js'
 import escortWalletRoutes from './routes/escortWalletRoutes.js'
+import carbonTokenRoutes from './routes/carbonTokenRoutes.js'
 import mlRoutes from './routes/mlRoutes.js'
+import tireAnalyticsRoutes from './routes/tireAnalyticsRoutes.js'
+import arLoadingRoutes from './routes/arLoadingRoutes.js'
 
 // ============================================================================
 // 🆕 MULTI-PROVIDER ORACLE & VERIFICATION ROUTES
@@ -169,6 +170,10 @@ import { startStaleOrderWorker, stopStaleOrderWorker } from './workers/staleOrde
 import { startDevicePruningWorker, stopDevicePruningWorker } from './workers/devicePruningWorker.js'
 import BlockchainMetrics from './services/blockchain/blockchainMetrics.js'
 import EscalationHandler from './services/blockchain/escalationHandler.js'
+import AlertRouter from './services/blockchain/alertRouter.js'
+import BlockchainMonitor from './services/blockchain/blockchainMonitor.js'
+import StateDivergenceDetector from './services/blockchain/stateDivergenceDetector.js'
+import BatchCallBuilder from './services/blockchain/batchCallBuilder.js'
 import {
   startWithdrawalSettlementWorker,
   stopWithdrawalSettlementWorker
@@ -202,6 +207,19 @@ CacheManager.init(redisClient)
 // ============================================================================
 const blockchainMetrics = new BlockchainMetrics()
 const escalationHandler = new EscalationHandler({})
+const alertRouter = new AlertRouter()
+const blockchainMonitor = new BlockchainMonitor({
+  alertRouter,
+  metricsService: blockchainMetrics,
+  escalationHandler,
+})
+const batchCallBuilder = new BatchCallBuilder({})
+const stateDivergenceDetector = new StateDivergenceDetector({
+  disableMonitoring: true, // started explicitly below in server.listen()
+  alertRouter,
+  escalationHandler,
+  batchCallBuilder,
+})
 
 // ============================================================================
 // STARTUP VALIDATION — crash fast, not at request time
@@ -504,6 +522,7 @@ app.use('/api/payments', authenticate, fraudDetectionMiddleware, networkAnalysis
 app.use('/api/driver', deadheadRoutes)
 app.use('/api/orders', trackingRoutes)
 app.use('/api/driver', driverRoutes)
+app.use('/api/drone', droneRoutes)
 // Mounted here, with the other REST routes, so it sits behind the full
 // middleware chain — body parsers, correlation/request IDs, HPP protection,
 // content-type enforcement, fraud detection and the /api rate limiter.
@@ -553,19 +572,39 @@ app.use('/api/webhooks', webhookRoutes)
 // 🆕 MULTI-PROVIDER ORACLE & VERIFICATION ROUTES
 // ============================================================================
 app.use('/api/verify', verificationRoutes)
+app.use('/api/biometric-auth', biometricAuthRoutes)
 app.use('/api/oracle', oracleRoutes)
+app.use('/api/carbon-credits', carbonTokenRoutes)
 app.use('/api/ml', mlRoutes)
+app.use('/api/tire-analytics', tireAnalyticsRoutes)
+app.use('/api/ar-loading', arLoadingRoutes)
 
 // ============================================================================
 // 🆕 BLOCKCHAIN MONITORING ROUTES
-// Attach the monitoring services and service-role client per request so the
-// handlers never fall back to the anon-key client (RLS would hide all rows).
-// NOTE: /api/blockchain must be mounted exactly once — a duplicate mount
-// registered earlier shadows this one and leaves req.supabase undefined.
+// Attach the monitoring services and the service-role client per request so
+// the handlers never fall back to the anon-key client (RLS would hide all
+// rows). The blockchainMonitoringRoutes router uses req.supabase (falling
+// back to the module-level client only when unmounted).
+//
+// #14307: /api/blockchain must be mounted EXACTLY once. A duplicate mount
+// registered earlier shadows this one, leaving req.supabase undefined and
+// causing silent auth/RLS failures. The marker below makes a second
+// registration of this router (duplicate import/re-evaluation or a
+// programmatic re-mount) crash the boot instead of failing silently;
+// blockchainMonitoringRoutes.test.js separately enforces that index.js
+// contains only a single literal mount.
 // ============================================================================
+const BLOCKCHAIN_MONITORING_MOUNTED = Symbol.for('truxify.api.blockchainMonitoring.mounted');
+if (blockchainMonitoringRoutes[BLOCKCHAIN_MONITORING_MOUNTED]) {
+  logger.fatal('[startup] /api/blockchain mounted more than once. A duplicate mount shadows the middleware that attaches req.supabase (service-role client). Remove the duplicate mount.')
+  throw new Error('/api/blockchain must be mounted exactly once (#14307).')
+}
+blockchainMonitoringRoutes[BLOCKCHAIN_MONITORING_MOUNTED] = true;
+
 app.use('/api/blockchain', (req, _res, next) => {
   req.blockchainMetrics = blockchainMetrics
   req.escalationHandler = escalationHandler
+  req.blockchainMonitor = blockchainMonitor
   req.supabase = supabaseAdmin
   next()
 }, blockchainMonitoringRoutes)
@@ -576,6 +615,9 @@ app.use('/api/blockchain', (req, _res, next) => {
 //   GET  /api/internal/escrow-velocity
 //   POST /api/internal/pause-escrow
 //   POST /api/internal/defensive-pause
+// Closing the escrow circuit breaker (pause-escrow with {"paused": false}) is
+// additionally gated inside the route on the dedicated ESCROW_OPERATOR_API_KEY
+// (403 for other valid keys; fails closed when unconfigured).
 // ============================================================================
 app.use('/api/internal', requireApiKey, internalRoutes)
 
@@ -762,6 +804,30 @@ server.listen(PORT, () => {
   startWithdrawalSettlementWorker()
   startOutboxRelayWorker()
 
+  // Start BlockchainMonitor during API startup.
+  // Worker health flag is set only after successful initialization.
+  let blockchainMonitorStarted = false
+  blockchainMonitor.initialize().then((initialized) => {
+    if (initialized) {
+      return blockchainMonitor.startListening()
+    }
+  }).then(() => {
+    blockchainMonitorStarted = true
+    globalThis.__truxify_workers = {
+      ...globalThis.__truxify_workers,
+      blockchainMonitor: true,
+    }
+  }).catch((err) => {
+    logger.error({ err }, '[BlockchainMonitor] Failed to initialize or start listening')
+    globalThis.__truxify_workers = {
+      ...globalThis.__truxify_workers,
+      blockchainMonitor: false,
+    }
+  })
+
+  // Start StateDivergenceDetector after blockchain monitor warms up.
+  stateDivergenceDetector.startMonitoring()
+
   // Register worker states for health aggregation
   globalThis.__truxify_workers = {
     escrowRefundReconciliation: true,
@@ -773,6 +839,8 @@ server.listen(PORT, () => {
     devicePruningWorker: true,
     documentExpiryWorker: true,
     withdrawalSettlementWorker: true,
+    // blockchainMonitor flag is set async above after successful startup
+    blockchainMonitor: blockchainMonitorStarted,
   }
 })
 
@@ -806,7 +874,8 @@ async function shutdown(signal) {
   stopWithdrawalSettlementWorker()
   stopOutboxRelayWorker()
   stopStaleOrderWorker()
-  stopDevicePruningWorker()
+  await blockchainMonitor.stopListening()
+  stateDivergenceDetector.stopMonitoring()
   fraudDetection.destroy()
   CacheManager.shutdown()
 
@@ -873,45 +942,5 @@ process.on('unhandledRejection', async (reason) => {
 
 process.on('SIGTERM', () => shutdown('SIGTERM')) // Docker / Kubernetes stop
 process.on('SIGINT', () => shutdown('SIGINT')) // Ctrl+C in dev
-
-app.use((err, req, res, next) => {
-  if (err?.type === 'entity.too.large') {
-    logger.warn(
-      {
-        requestId: req.requestId,
-        ip: req.ip,
-        method: req.method,
-        path: req.originalUrl,
-      },
-      'Request payload exceeded configured limit'
-    );
-
-    return res.status(413).json({
-      error: 'Payload too large',
-    });
-  }
-
-  if (
-    err instanceof SyntaxError &&
-    err.status === 400 &&
-    'body' in err
-  ) {
-    logger.warn(
-      {
-        requestId: req.requestId,
-        ip: req.ip,
-        method: req.method,
-        path: req.originalUrl,
-      },
-      'Malformed JSON payload received'
-    );
-
-    return res.status(400).json({
-      error: 'Malformed JSON payload',
-    });
-  }
-
-  next(err);
-});
 
 app.use('/api/tolls', tollOptimizationRouter);

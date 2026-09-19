@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   validatePricePrediction,
+  validatePrediction,
   convertToPaisa,
   RejectionReason,
 } from '../../../src/lib/predictionValidator.js';
@@ -11,12 +12,20 @@ describe('validatePricePrediction', () => {
       const result = validatePricePrediction(null);
       expect(result.ok).toBe(false);
       expect(result.reason).toBe(RejectionReason.NULL_RESPONSE);
+
+      const aliasResult = validatePrediction(null);
+      expect(aliasResult.ok).toBe(false);
+      expect(aliasResult.reason).toBe(RejectionReason.NULL_RESPONSE);
     });
 
     it('rejects undefined', () => {
       const result = validatePricePrediction(undefined);
       expect(result.ok).toBe(false);
       expect(result.reason).toBe(RejectionReason.NULL_RESPONSE);
+
+      const aliasResult = validatePrediction(undefined);
+      expect(aliasResult.ok).toBe(false);
+      expect(aliasResult.reason).toBe(RejectionReason.NULL_RESPONSE);
     });
   });
 

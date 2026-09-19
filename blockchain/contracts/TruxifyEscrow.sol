@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+﻿// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
@@ -78,6 +78,7 @@ contract TruxifyEscrow is ReentrancyGuard, Ownable, Pausable {
         uint256 amount
     );
 
+        event DisputeSettled(bytes32 indexed bookingId, address indexed recipient, uint256 amount);
     event BookingCancelled(
         uint256 indexed bookingId,
         address indexed customer,
@@ -88,6 +89,12 @@ contract TruxifyEscrow is ReentrancyGuard, Ownable, Pausable {
         uint256 indexed bookingId,
         address indexed driver,
         uint256 amount
+    );
+
+    event BookingAmountUpdated(
+        uint256 indexed bookingId,
+        uint256 previousAmount,
+        uint256 newAmount
     );
 
     event CancellationPenaltyApplied(
@@ -280,6 +287,45 @@ contract TruxifyEscrow is ReentrancyGuard, Ownable, Pausable {
         bookingCount++;
 
         emit BookingCreated(bookingId, customer, driver, msg.value);
+    }
+
+    /**
+     * @dev Adjust an active booking amount after a customer changes the drop.
+     *      Increases must be funded exactly in the same transaction. Decreases
+     *      become a pull refund for the customer.
+     */
+    function updateDropLocation(uint256 bookingId, uint256 newAmount)
+        external
+        payable
+        onlyOwner
+        nonReentrant
+        whenNotPaused
+    {
+        Booking storage booking = bookings[bookingId];
+        require(
+            booking.customer != address(0) && booking.status == BookingStatus.Active,
+            "TruxifyEscrow: Cannot update - booking not active"
+        );
+        require(!booking.paid, "TruxifyEscrow: Already paid");
+        require(!booking.started, "TruxifyEscrow: Trip already started");
+        require(newAmount > 0, "TruxifyEscrow: Amount must be positive");
+
+        uint256 previousAmount = booking.amount;
+        if (newAmount > previousAmount) {
+            require(
+                msg.value == newAmount - previousAmount,
+                "TruxifyEscrow: Incorrect top-up amount"
+            );
+        } else {
+            require(msg.value == 0, "TruxifyEscrow: Unexpected top-up amount");
+            uint256 refundAmount = previousAmount - newAmount;
+            pendingWithdrawals[booking.customer] += refundAmount;
+            releaseTimestamps[booking.customer] = block.timestamp + WITHDRAWAL_TIMEOUT;
+            emit WithdrawalReady(bookingId, booking.customer, refundAmount);
+        }
+
+        booking.amount = newAmount;
+        emit BookingAmountUpdated(bookingId, previousAmount, newAmount);
     }
 
     /**
@@ -598,7 +644,7 @@ contract TruxifyEscrow is ReentrancyGuard, Ownable, Pausable {
                 releaseTimestamps[driver] = newDeadline;
             }
             emit WithdrawalReady(bookingId, driver, escrowAmount);
-            emit BookingCancelled(bookingId, customer, 0);
+            emit DisputeSettled(bookingId, driver, escrowAmount);
         } else {
             pendingWithdrawals[customer] += escrowAmount;
             releaseTimestamps[customer] = newDeadline;

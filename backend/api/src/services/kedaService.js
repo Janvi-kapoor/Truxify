@@ -1,4 +1,6 @@
 import axios from 'axios';
+import fs from 'fs';
+import https from 'https';
 import logger from '../middleware/logger.js';
 
 class KEDAService {
@@ -8,6 +10,12 @@ class KEDAService {
         this.kafkaLagMetric = process.env.KAFKA_LAG_METRIC || 'kafka_consumergroup_lag';
         this.kafkaTopicLabel = process.env.KAFKA_TOPIC_LABEL || 'topic';
         this.kafkaConsumerGroupLabel = process.env.KAFKA_CONSUMER_GROUP_LABEL || 'consumergroup';
+        this.kedaApiUrl = process.env.KEDA_API_URL || 'https://kubernetes.default.svc';
+        this.kedaApiToken = process.env.KEDA_API_TOKEN || '';
+        this.kedaCaCertPath = process.env.KEDA_CA_CERT_PATH || '/var/run/secrets/kubernetes.io/serviceaccount/ca.crt';
+        this.kedaRequestTimeout = Number(process.env.KEDA_REQUEST_TIMEOUT_MS) || 5000;
+        this.kedaPollInterval = Number(process.env.KEDA_POLL_INTERVAL_MS) || 1000;
+        this.kedaPollTimeout = Number(process.env.KEDA_POLL_TIMEOUT_MS) || 10000;
 
         logger.info('KEDA Service initialized');
     }
@@ -23,6 +31,137 @@ class KEDAService {
     _sanitizePromqlIdentifier(input, fallback) {
         const sanitized = String(input || '').replace(/[^a-zA-Z0-9_:]/g, '');
         return sanitized || fallback;
+    }
+
+    /**
+     * Build the authenticated HTTPS request options for the Kubernetes API.
+     *
+     * @returns {object} Axios request configuration
+     * @throws {Error} when a bearer token would be sent over HTTP
+     */
+    _kedaRequestConfig() {
+        const kedaUrl = new URL(this.kedaApiUrl);
+        if (this.kedaApiToken && kedaUrl.protocol !== 'https:') {
+            throw new Error('KEDA_API_URL must use HTTPS when KEDA_API_TOKEN is configured.');
+        }
+
+        const config = { timeout: this.kedaRequestTimeout };
+        if (this.kedaApiToken) {
+            config.headers = { Authorization: `Bearer ${this.kedaApiToken}` };
+        }
+        if (kedaUrl.protocol === 'https:' && fs.existsSync(this.kedaCaCertPath)) {
+            config.httpsAgent = new https.Agent({
+                ca: fs.readFileSync(this.kedaCaCertPath),
+                rejectUnauthorized: true,
+            });
+        }
+        return config;
+    }
+
+    /**
+     * Fetch the status of one KEDA ScaledObject from the Kubernetes API.
+     *
+     * @param {string} namespace Kubernetes namespace containing the object
+     * @param {string} scaledObjectName KEDA ScaledObject resource name
+     * @returns {Promise<object>} normalized status or failure result
+     */
+    async getScaledObjectStatus(namespace, scaledObjectName) {
+        const timestamp = () => new Date().toISOString();
+
+        if (!namespace || !String(namespace).trim()) {
+            return { success: false, error: 'namespace is required', timestamp: timestamp() };
+        }
+
+        if (!scaledObjectName || !String(scaledObjectName).trim()) {
+            return { success: false, error: 'scaledObjectName is required', timestamp: timestamp() };
+        }
+
+        const url = `${this.kedaApiUrl}/apis/keda.sh/v1alpha1/namespaces/${encodeURIComponent(String(namespace).trim())}/scaledobjects/${encodeURIComponent(String(scaledObjectName).trim())}`;
+
+        try {
+            const response = await axios.get(url, this._kedaRequestConfig());
+
+            if (response.status !== 200) {
+                logger.error(
+                    { event: 'KEDA_SCALED_OBJECT_STATUS_ERROR', statusCode: response.status },
+                    'KEDA scaled object status request failed',
+                );
+                return {
+                    success: false,
+                    error: `KEDA API returned HTTP ${response.status}`,
+                    statusCode: response.status,
+                    timestamp: timestamp(),
+                };
+            }
+
+            return {
+                success: true,
+                status: response.data?.status || {},
+                data: response.data,
+                timestamp: timestamp(),
+            };
+        } catch (error) {
+            const errorMessage = error?.message ?? String(error);
+            logger.warn(
+                {
+                    event: 'KEDA_SCALED_OBJECT_STATUS_ERROR',
+                    error: errorMessage,
+                    stack: error?.stack,
+                },
+                'KEDA scaled object status request failed',
+            );
+            return {
+                success: false,
+                error: errorMessage,
+                ...(error?.response?.status ? { statusCode: error.response.status } : {}),
+                timestamp: timestamp(),
+            };
+        }
+    }
+
+    /**
+     * Poll a KEDA ScaledObject until a predicate succeeds or the timeout ends.
+     *
+     * @param {string} namespace Kubernetes namespace containing the object
+     * @param {string} scaledObjectName KEDA ScaledObject resource name
+     * @param {Function} predicate predicate evaluated against each returned status
+     * @param {object} options polling interval and timeout in milliseconds
+     * @returns {Promise<object>} successful status or timed-out failure result
+     */
+    async waitForScaledObjectStatus(namespace, scaledObjectName, predicate, options = {}) {
+        const check = typeof predicate === 'function' ? predicate : () => true;
+        const interval = Number(options.intervalMs) || this.kedaPollInterval;
+        const timeout = Number(options.timeoutMs) || this.kedaPollTimeout;
+        const startedAt = Date.now();
+        let latestResult;
+
+        do {
+            latestResult = await this.getScaledObjectStatus(namespace, scaledObjectName);
+            if (latestResult.success && check(latestResult.status, latestResult)) {
+                return { ...latestResult, timedOut: false };
+            }
+
+            if (Date.now() - startedAt >= timeout) {
+                break;
+            }
+
+            await new Promise(resolve => setTimeout(resolve, interval));
+        } while (Date.now() - startedAt < timeout);
+
+        logger.warn(
+            { namespace, scaledObjectName, timeoutMs: timeout },
+            'Timed out waiting for KEDA scaled object status',
+        );
+
+        return {
+            ...(latestResult || {
+                success: false,
+                error: 'KEDA status polling did not run',
+            }),
+            success: false,
+            timedOut: true,
+            error: latestResult?.error || 'Timed out waiting for KEDA scaled object status',
+        };
     }
 
     async getMetrics(metricName, query) {
@@ -48,10 +187,14 @@ class KEDAService {
                 timestamp: new Date().toISOString()
             };
         } catch (error) {
-            logger.error({ event: 'KEDA_METRICS_FETCH_ERROR', error: error?.message }, 'Metrics fetch failed');
+            const errorMessage = error?.message ?? String(error);
+            logger.warn(
+                { event: 'KEDA_METRICS_FETCH_ERROR', error: errorMessage, stack: error?.stack },
+                'Metrics fetch failed',
+            );
             return {
                 success: false,
-                error: error?.message ?? String(error),
+                error: errorMessage,
                 timestamp: new Date().toISOString()
             };
         }
@@ -105,10 +248,14 @@ class KEDAService {
             const query = `sum(rate(container_cpu_usage_seconds_total{namespace="${ns}",pod=~"${dep}-.*"}[5m]))`;
             return await this.getMetrics('cpu_usage', query);
         } catch (error) {
-            logger.error({ event: 'KEDA_CPU_FETCH_ERROR', error: error?.message }, 'CPU usage fetch failed');
+            const errorMessage = error?.message ?? String(error);
+            logger.warn(
+                { event: 'KEDA_CPU_FETCH_ERROR', error: errorMessage, stack: error?.stack },
+                'CPU usage fetch failed',
+            );
             return {
                 success: false,
-                error: error?.message ?? String(error),
+                error: errorMessage,
                 timestamp: new Date().toISOString()
             };
         }
@@ -121,10 +268,14 @@ class KEDAService {
             const query = `sum(container_memory_usage_bytes{namespace="${ns}",pod=~"${dep}-.*"})`;
             return await this.getMetrics('memory_usage', query);
         } catch (error) {
-            logger.error({ event: 'KEDA_MEMORY_FETCH_ERROR', error: error?.message }, 'Memory usage fetch failed');
+            const errorMessage = error?.message ?? String(error);
+            logger.warn(
+                { event: 'KEDA_MEMORY_FETCH_ERROR', error: errorMessage, stack: error?.stack },
+                'Memory usage fetch failed',
+            );
             return {
                 success: false,
-                error: error?.message ?? String(error),
+                error: errorMessage,
                 timestamp: new Date().toISOString()
             };
         }
@@ -137,10 +288,14 @@ class KEDAService {
             const query = `kube_deployment_status_replicas{namespace="${ns}",deployment="${dep}"}`;
             return await this.getMetrics('replica_count', query);
         } catch (error) {
-            logger.error({ event: 'KEDA_REPLICA_FETCH_ERROR', error: error?.message }, 'Replica count fetch failed');
+            const errorMessage = error?.message ?? String(error);
+            logger.warn(
+                { event: 'KEDA_REPLICA_FETCH_ERROR', error: errorMessage, stack: error?.stack },
+                'Replica count fetch failed',
+            );
             return {
                 success: false,
-                error: error?.message ?? String(error),
+                error: errorMessage,
                 timestamp: new Date().toISOString()
             };
         }
@@ -207,6 +362,29 @@ class KEDAService {
             metrics,
             timestamp: new Date().toISOString()
         };
+    }
+
+    
+    async getServiceHealthDiagnostics(namespace = 'default', deployment = 'api-service') {
+        try {
+            const autoscaling = await this.getAutoscalingMetrics(namespace, deployment);
+            return {
+                status: autoscaling.success ? 'HEALTHY' : 'DEGRADED',
+                diagnosticsTimestamp: new Date().toISOString(),
+                metricsStatus: autoscaling
+            };
+        } catch (error) {
+            const errorMessage = error?.message ?? String(error);
+            logger.warn(
+                { event: 'KEDA_DIAGNOSTICS_ERROR', error: errorMessage, stack: error?.stack },
+                'Health diagnostics failed',
+            );
+            return {
+                status: 'UNHEALTHY',
+                error: errorMessage,
+                diagnosticsTimestamp: new Date().toISOString()
+            };
+        }
     }
 
     async getStats() {

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+﻿// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
 import "@openzeppelin/contracts/access/Ownable.sol";
@@ -15,6 +15,7 @@ contract DocumentRegistry is Ownable {
     mapping(address => mapping(string => Document)) public registry;
 
     event DocumentRegistered(address indexed driver, string documentType, bytes32 docHash, bool isVerified);
+    event DocumentRevoked(address indexed driver, string documentType, bytes32 docHash);
 
     constructor() Ownable(msg.sender) {}
 
@@ -24,12 +25,21 @@ contract DocumentRegistry is Ownable {
         bytes32 docHash,
         bool isVerified
     ) external onlyOwner {
+        require(docHash != bytes32(0), "DocumentRegistry: Invalid zero hash");
+        require(driver != address(0), "DocumentRegistry: Invalid driver address");
+
+        Document storage prev = registry[driver][documentType];
+        if (prev.hash != bytes32(0)) {
+            emit DocumentRevoked(driver, documentType, prev.hash);
+        }
+
         registry[driver][documentType] = Document({
             hash: docHash,
             documentType: documentType,
             registeredAt: block.timestamp,
             isVerified: isVerified
         });
+
         emit DocumentRegistered(driver, documentType, docHash, isVerified);
     }
 

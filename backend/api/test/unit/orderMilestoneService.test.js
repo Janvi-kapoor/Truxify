@@ -42,6 +42,30 @@ describe('orderMilestoneService', () => {
     });
   });
 
+  describe('constructor', () => {
+    it('correctly receives and stores all supported injected dependencies', () => {
+      const orderRepository = {};
+      const orderValidationService = {};
+      const orderTimelineService = {};
+      const orderNotificationService = {};
+      const trackingTokenService = {};
+
+      const service = new OrderMilestoneService({
+        orderRepository,
+        orderValidationService,
+        orderTimelineService,
+        orderNotificationService,
+        trackingTokenService,
+      });
+
+      expect(service.orderRepository).toBe(orderRepository);
+      expect(service.validation).toBe(orderValidationService);
+      expect(service.orderTimelineService).toBe(orderTimelineService);
+      expect(service.orderNotificationService).toBe(orderNotificationService);
+      expect(service.trackingTokenService).toBe(trackingTokenService);
+    });
+  });
+
   describe('addMilestone', () => {
     it('adds a milestone to an order', async () => {
       const milestone = { id: 'm1', order_id: 'order-1', type: 'pickup', status: 'pending' };
